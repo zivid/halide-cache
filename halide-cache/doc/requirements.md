@@ -19,6 +19,12 @@ If time permits, we could look into analysis the dependency graph of each kernel
 if only one file changes in the Vision engine, but even without this the cache will be useful for many developers and
 many of the builds that run in the CI.
 
+### 1.1 Situation in the repository
+
+There is already in the repository [dependency_finder.py](/sdk/vision-engine/scripts/dependency_finder.py) that does
+a part of what we want. We could try to rewrite it in Rust to have better performance or build on top of it by using
+for example Pyo3 to see if we can leverage the idea to further along the caching.
+
 ## 2. Store generated files in a cache
 
 When we have generated a halide kernels, we need to capture all the output files and store them in a cache on the file
