@@ -60,7 +60,7 @@ impl Lager {
             compression::read_dir(destination, file)?;
             Ok(())
         } else {
-            Err(Error::NoSuchFile { path: source })
+            Err(Error::NotFound{ address: address.clone() })
         }
     }
 
@@ -139,5 +139,17 @@ mod tests {
         let content2 = std::fs::read(retrieve_path.join("file2.txt")).unwrap();
         assert_eq!(content1, b"File 1");
         assert_eq!(content2, b"File 2");
+    }
+    
+    #[test]
+    fn test_retrieve_nonexistent_address() {
+        let dir = TempDir::new("lager_test").unwrap();
+        let lager = Lager::new(dir.path()).unwrap();
+
+        let address = Address::from([2u8; 32]);
+        let retrieve_path = dir.path().join("nonexistent_retrieved.txt");
+
+        let result = lager.retrieve(&address, &retrieve_path);
+        assert!(matches!(result, Err(Error::NotFound { .. })));
     }
 }
