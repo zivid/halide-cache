@@ -1,8 +1,13 @@
 use crate::{compression, shard_path, Address};
+use crate::{Error, Result};
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
-use crate::{Error, Result};
+pub(crate) const SHARDING_LEVELS: usize = 2;
+
+const FILE_EXTENSION: &'static str = "zst";
+const DIR_EXTENSION: &'static str = "tar.zst";
 
 pub struct Lager {
     root: PathBuf,
@@ -16,8 +21,6 @@ impl Lager {
     }
 
     pub fn store_at(&self, address: &Address, source: &Path) -> Result<()> {
-        const SHARDING_LEVELS: u32 = 2;
-
         let mut dest = self.root.join(shard_path(address, SHARDING_LEVELS));
 
         if let Some(parent) = dest.parent() {
@@ -25,10 +28,10 @@ impl Lager {
         }
 
         if source.is_file() {
-            dest.set_extension("zst");
+            dest.set_extension(FILE_EXTENSION);
             compression::write_file(source, File::create(dest)?)?;
         } else if source.is_dir() {
-            dest.set_extension("tar.zst");
+            dest.set_extension(DIR_EXTENSION);
             compression::write_dir(source, File::create(dest)?)?;
         } else {
             return Err(Error::NoSuchFile {
@@ -42,19 +45,44 @@ impl Lager {
     pub fn retrieve(&self, address: &Address, destination: &Path) -> Result<()> {
         let mut source = self.root.join(shard_path(address, 2));
 
-        source.set_extension("zst");
+        source.set_extension(FILE_EXTENSION);
         if source.exists() {
-            compression::read_file(File::open(source)?, destination)?;
+            let file = File::open(source)?;
+            file.set_modified(SystemTime::now())?;
+            compression::read_file(file, destination)?;
             return Ok(());
         }
 
-        source.set_extension("tar.zst");
+        source.set_extension(DIR_EXTENSION);
         if source.exists() {
-            compression::read_dir(destination, File::open(source)?)?;
+            let file = File::open(source)?;
+            file.set_modified(SystemTime::now())?;
+            compression::read_dir(destination, file)?;
             Ok(())
         } else {
             Err(Error::NoSuchFile { path: source })
         }
+    }
+
+    pub(crate) fn remove(&self, address: &Address) -> Result<()> {
+        let mut path = self.root.join(shard_path(address, SHARDING_LEVELS));
+
+        path.set_extension(FILE_EXTENSION);
+        if path.exists() {
+            std::fs::remove_file(path)?;
+            return Ok(());
+        }
+
+        path.set_extension(DIR_EXTENSION);
+        if path.exists() {
+            std::fs::remove_file(path)?;
+            return Ok(());
+        }
+
+        Ok(())
+    }
+    pub(crate) fn dir(&self) -> PathBuf {
+        self.root.clone()
     }
 }
 

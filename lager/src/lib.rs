@@ -1,47 +1,44 @@
 mod compression;
+mod error;
 mod lager;
+mod lru;
 
-pub use lager::Lager;
+pub use crate::error::Error;
+pub use crate::lager::Lager;
+pub use crate::lru::LRU;
 
-use std::io;
+use std::fmt::Display;
+
 use std::path::PathBuf;
 
 use hex;
 use thiserror::Error;
 
-fn format_io_error_with_message(msg: &Option<String>, source: &io::Error) -> String {
-    match msg {
-        Some(m) => format!("{}: {}", m, source),
-        None => format!("{}", source),
-    }
-}
-
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("{}", .msg)]
-    Runtime { msg: String },
-    #[error("No such file or directory: {}", .path.display())]
-    NoSuchFile { path: PathBuf },
-    #[error("{}", format_io_error_with_message(.msg, .source))]
-    Io {
-        msg: Option<String>,
-        #[source]
-        source: io::Error,
-    },
-}
-
-impl From<io::Error> for Error {
-    fn from(source: io::Error) -> Self {
-        Error::Io {
-            msg: None,
-            source: io::Error::new(io::ErrorKind::Other, source),
-        }
-    }
-}
-
 pub type Result<T> = std::result::Result<T, Error>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct Address([u8; 32]);
+
+impl Address {
+    pub(crate) fn from_hex(hex: &str) -> Result<Self> {
+        let bytes = hex::decode(hex).map_err(|e| Error::Runtime {
+            msg: format!("Failed to decode address: {}", hex),
+            source: Some(Box::new(e)),
+        })?;
+        if bytes.len() != 32 {
+            return Err(Error::Runtime {
+                msg: format!(
+                    "Invalid address length ({}). Only 32 byte addresses are supported.",
+                    bytes.len()
+                ),
+                source: None,
+            });
+        }
+        let mut array = [0u8; 32];
+        array.copy_from_slice(&bytes);
+        Ok(Address(array))
+    }
+}
 
 impl From<[u8; 32]> for Address {
     fn from(bytes: [u8; 32]) -> Self {
@@ -49,17 +46,24 @@ impl From<[u8; 32]> for Address {
     }
 }
 
-impl Into<String> for &Address {
-    fn into(self) -> String {
-        hex::encode(self.0)
+impl From<&Address> for String {
+    fn from(address: &Address) -> Self {
+        hex::encode(address.0)
     }
 }
 
-fn shard_path(address: &Address, levels: u32) -> PathBuf {
+impl Display for Address {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let address_str: String = self.into();
+        write!(f, "{}", address_str)
+    }
+}
+
+fn shard_path(address: &Address, levels: usize) -> PathBuf {
     let address_str: String = address.into();
     let mut path = PathBuf::new();
     for i in 0..levels {
-        let start = (i * 2) as usize;
+        let start = i * 2;
         let end = start + 2;
         path.push(&address_str[start..end]);
     }
