@@ -1,0 +1,13 @@
+[package]
+name = "lager"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+hex = "0.4.3"
+tar = "0.4.44"
+thiserror = "2.0.17"
+zstd = "0.13.3"
+
+[dev-dependencies]
+tempdir = "0.3.7"
