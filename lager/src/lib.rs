@@ -41,8 +41,25 @@ impl Address {
 
 }
 
-impl From<[u8; 32]> for Address {
-    fn from(bytes: [u8; 32]) -> Self {
+impl std::convert::TryFrom<&[u8]> for Address {
+    type Error = Error;
+    fn try_from(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() != 64 {
+            return Err(Error::Runtime {
+                msg: format!(
+                    "Invalid address length ({}). Only 64 byte addresses are supported.",
+                    bytes.len()
+                ),
+                source: None,
+            });
+        }
+        let mut array = [0u8; 64];
+        array.copy_from_slice(bytes);
+        Ok(Address(array))
+    }
+}
+impl From<[u8; 64]> for Address {
+    fn from(bytes: [u8; 64]) -> Self {
         Address(bytes)
     }
 }
