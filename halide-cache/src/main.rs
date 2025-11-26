@@ -2,10 +2,9 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use clap::Parser;
-use lager::Lager;
-use serde::Serialize;
+use lager::{Address, Lager};
 
-#[derive(Parser, Serialize, Debug)]
+#[derive(Parser, Debug)]
 struct Args {
     #[arg(short, long, num_args = 1..)]
     dependencies: Vec<PathBuf>,
@@ -17,19 +16,16 @@ struct Args {
     builder: Vec<String>,
 }
 
-#[derive(Serialize)]
-struct DependencyList {
-    files: Vec<String>,
-}
-
 fn main() {
     let args = Args::parse();
-    let cache_dir = env::var("HALIDE_CACHE_DIR").unwrap();
 
-    if args.builder.is_empty() {
-        eprintln!("Usage: halide-cache --dependencies <files...> -- <command> [args...]");
-        std::process::exit(1);
-    }
+    let cache_dir =  match env::var("HALIDE_CACHE_DIR") {
+        Ok(env) => env,
+        Err(e) => {
+            eprintln!("HALIDE_CACHE_DIR environment variable not set: {}", e);
+            std::process::exit(1);
+        }
+    };
 
     let lager = match Lager::new(Path::new(&cache_dir)) {
         Ok(l) => l,
@@ -38,65 +34,71 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let mut object_dependencies = DependencyList {
-        files: vec![],
-    };
 
-    let mut header_dependencies = DependencyList {
-        files: vec![],
-    };
+    let mut object_dependencies = vec![args.generated_object.clone().into_os_string().into_string().unwrap()];
+    let mut header_dependencies = vec![args.generated_header.clone().into_os_string().into_string().unwrap()];
 
-    for dep in &args.dependencies {
-        let hash = match compute_hash_of_file_with_blake3(dep) {
-            Ok(h) => h,
-            Err(e) => {
-                eprintln!("Failed to compute hash for {:?}: {}", args.dependencies, e);
-                std::process::exit(1);
-            }
-        };
-        object_dependencies.files.push(hash.clone());
-        header_dependencies.files.push(hash);
-    }
-    object_dependencies.files.push("object".to_string());
-    header_dependencies.files.push("header".to_string());
-    let object_json = serde_json::to_string(&object_dependencies).unwrap();
-    let header_json = serde_json::to_string(&header_dependencies).unwrap();
-    let object_hash = hash_string(&object_json);
-    let header_hash = hash_string(&header_json);
-    let object_hashish = &object_hash.into_bytes().as_slice().try_into().unwrap();
-    let header_hashish = &header_hash.into_bytes().as_slice().try_into().unwrap();
+    hash_all_dependencies_contents(
+        args.dependencies,
+        &mut object_dependencies,
+        &mut header_dependencies
+    );
 
-    match lager.retrieve(&object_hashish, args.generated_object.as_path()) {
-        Ok(_) => {
-            println!("Cache hit for Halide object. {:?}", args.generated_object);
-            match lager.retrieve(&header_hashish, args.generated_header.as_path()) {
-                Ok(_) => {
-                    // Cache hit, no need to build
-                    println!("Cache hit for Halide header {:?}", args.generated_header);
-                    return;
-                }
-                Err(e) => {
-                    println!("Error for Halide header {}", e);
-                    // Cache miss, proceed to build
-                }
-            }
-        }
-        Err(e) => {
-            println!("Error for Halide object {}", e);
-        }
-    }
+    let object_address = hash_vector(&object_dependencies);
+    let header_address = hash_vector(&header_dependencies);
+
+    if cache_hit(&args.generated_object, &args.generated_header, &lager, &object_address, &header_address) { return; }
+
     let status = Command::new(&args.builder[0])
         .args(&args.builder[1..])
         .status()
         .expect("Failed to execute command");
+
     if status.success(){
-        lager.store_at(&object_hashish, &args.generated_object).expect("Store at failed for the Halide object");
-        lager.store_at(&header_hashish, &args.generated_header).expect("Store at failed for the Halide header");
-        println!("Objects cached successfully. \n With hashes {} and {}", object_hashish, header_hashish);
+        lager.store_at(&object_address, &args.generated_object).expect("Store at failed for the Halide object");
+        lager.store_at(&header_address, &args.generated_header).expect("Store at failed for the Halide header");
     }
 }
 
-fn compute_hash_of_file_with_blake3<P: AsRef<std::path::Path>>(path: P) -> Result<String, Box<dyn std::error::Error>> {
+fn hash_all_dependencies_contents(dependencies: Vec<PathBuf>, object_dependencies: &mut Vec<String>, header_dependencies: &mut Vec<String>) {
+    for dep in &dependencies {
+        let file_content_hash = match compute_hash_of_file(dep) {
+            Ok(hash) => hash,
+            Err(e) => {
+                eprintln!("Failed to compute hash for {:?}: {}", dependencies, e);
+                std::process::exit(1);
+            }
+        };
+        object_dependencies.push(file_content_hash.clone());
+        header_dependencies.push(file_content_hash);
+    }
+}
+
+fn cache_hit(generated_object: &PathBuf, generated_header: &PathBuf, lager: &Lager, object_address: &Address, header_address: &Address) -> bool {
+    match lager.retrieve(object_address, generated_object.as_path()) {
+        Ok(_) => {
+            println!("Cache hit for Halide object. {:?}", generated_object);
+            match lager.retrieve(header_address, generated_header.as_path()) {
+                Ok(_) => {
+                    println!("Cache hit for Halide header {:?}", generated_header);
+                    return true;
+                }
+                Err(e) => {
+                    eprintln!("Error for Halide header {}", e);
+                }
+            }
+        }
+        Err(_) => {
+            // Cache miss, proceed to build
+        }
+    }
+    false
+}
+
+fn serialize_vector(vec: &[String]) -> String {
+    format!("[{}]", vec.iter().map(|s| format!("\"{}\"", s)).collect::<Vec<String>>().join(","))
+}
+fn compute_hash_of_file<P: AsRef<std::path::Path>>(path: P) -> Result<String, Box<dyn std::error::Error>> {
     let mut file = std::fs::File::open(path)?;
     let mut hasher = blake3::Hasher::new();
     std::io::copy(&mut file, &mut hasher)?;
@@ -104,8 +106,13 @@ fn compute_hash_of_file_with_blake3<P: AsRef<std::path::Path>>(path: P) -> Resul
     Ok(hash.to_hex().to_string())
 }
 
-fn hash_string(input: &str) -> String {
+fn hash_vector(vector: &[String]) -> Address {
+    let input = serialize_vector(vector);
     let mut hasher = blake3::Hasher::new();
     hasher.update(input.as_bytes());
-    hasher.finalize().to_hex().to_string()
+    let hash = hasher.finalize().to_hex().to_string();
+    match hash.into_bytes().as_slice().try_into() {
+        Ok(addr) => addr,
+        Err(_) => panic!("Hash length mismatch"),
+    }
 }
