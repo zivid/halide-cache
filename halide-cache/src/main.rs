@@ -2,7 +2,8 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use clap::Parser;
-use lager::{Address, Lager};
+use named_lock::NamedLock;
+use lager::{Address, Lager, LRU};
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -15,6 +16,8 @@ struct Args {
     #[arg(last = true)]
     builder: Vec<String>,
 }
+
+const MAX_CACHE_SIZE: u64 = u16::MAX as u64;
 
 fn main() {
     let args = Args::parse();
@@ -57,6 +60,19 @@ fn main() {
     if status.success(){
         lager.store_at(&object_address, &args.generated_object).expect("Store at failed for the Halide object");
         lager.store_at(&header_address, &args.generated_header).expect("Store at failed for the Halide header");
+    }
+
+    try_cleaning_up(lager);
+}
+
+fn try_cleaning_up(lager: Lager) {
+    let lock = NamedLock::create("lager_lock").unwrap();
+    if let Ok(_guard) = lock.lock(){
+        let mut lru = LRU::new(lager);
+        lru.scan().unwrap();
+        if lru.lager_size() > MAX_CACHE_SIZE {
+            lru.evict_until(MAX_CACHE_SIZE).unwrap();
+        }
     }
 }
 

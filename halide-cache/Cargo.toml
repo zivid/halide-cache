@@ -7,3 +7,4 @@ edition = "2024"
 lager = { path = "../lager" }
 blake3 = "1.8.2"
 clap = { version = "4.5.53", features = ["derive"] }
+named-lock = "0.4.1"
