@@ -17,7 +17,7 @@ struct Args {
     builder: Vec<String>,
 }
 
-const MAX_CACHE_SIZE: u64 = u16::MAX as u64;
+const MAX_CACHE_SIZE_BYTES: u64 = 10737418240 ; // 10 GiB
 
 fn main() {
     let args = Args::parse();
@@ -70,8 +70,8 @@ fn try_cleaning_up(lager: Lager) {
     if let Ok(_guard) = lock.lock(){
         let mut lru = LRU::new(lager);
         lru.scan().unwrap();
-        if lru.lager_size() > MAX_CACHE_SIZE {
-            lru.evict_until(MAX_CACHE_SIZE).unwrap();
+        if lru.lager_size() > MAX_CACHE_SIZE_BYTES {
+            lru.evict_until(MAX_CACHE_SIZE_BYTES).unwrap();
         }
     }
 }
