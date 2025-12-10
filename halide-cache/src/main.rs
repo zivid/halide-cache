@@ -1,4 +1,4 @@
-use std::env;
+use std::{env, fs};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use clap::Parser;
@@ -30,6 +30,7 @@ fn main() {
         }
     };
 
+    fs::create_dir_all(&cache_dir).unwrap();
     let lager = match Lager::new(Path::new(&cache_dir)) {
         Ok(l) => l,
         Err(e) => {
