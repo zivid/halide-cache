@@ -30,7 +30,9 @@ fn main() {
         }
     };
 
-    fs::create_dir_all(&cache_dir).unwrap();
+    if !Path::new(&cache_dir).exists() {
+        fs::create_dir_all(&cache_dir).unwrap();
+    }
     let lager = match Lager::new(Path::new(&cache_dir)) {
         Ok(l) => l,
         Err(e) => {
