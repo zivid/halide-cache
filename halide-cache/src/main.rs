@@ -41,8 +41,13 @@ fn main() {
         }
     };
 
-    let mut object_dependencies = vec![args.generated_object.clone().into_os_string().into_string().unwrap()];
-    let mut header_dependencies = vec![args.generated_header.clone().into_os_string().into_string().unwrap()];
+    let zivid_env = collect_zivid_env();
+
+    let mut object_dependencies = zivid_env.clone();
+    object_dependencies.push(args.generated_object.clone().into_os_string().into_string().unwrap());
+
+    let mut header_dependencies = zivid_env;
+    header_dependencies.push(args.generated_header.clone().into_os_string().into_string().unwrap());
 
     hash_all_dependencies_contents(
         args.dependencies,
@@ -77,6 +82,14 @@ fn try_cleaning_up(lager: Lager) {
             lru.evict_until(MAX_CACHE_SIZE_BYTES).unwrap();
         }
     }
+}
+
+fn collect_zivid_env() -> Vec<String> {
+    let mut v = std::env::vars()
+        .filter_map(|(k, v)| k.starts_with("ZIVID_").then(|| format!("{}={}", k, v)))
+        .collect::<Vec<_>>();
+    v.sort();
+    return v;
 }
 
 fn hash_all_dependencies_contents(dependencies: Vec<PathBuf>, object_dependencies: &mut Vec<String>, header_dependencies: &mut Vec<String>) {
