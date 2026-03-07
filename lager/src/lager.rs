@@ -1,4 +1,4 @@
-use crate::{compression, shard_path, Address};
+use crate::{Address, compression, shard_path};
 use crate::{Error, Result};
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -60,7 +60,9 @@ impl Lager {
             compression::read_dir(destination, file)?;
             Ok(())
         } else {
-            Err(Error::NotFound{ address: address.clone() })
+            Err(Error::NotFound {
+                address: address.clone(),
+            })
         }
     }
 
@@ -140,7 +142,7 @@ mod tests {
         assert_eq!(content1, b"File 1");
         assert_eq!(content2, b"File 2");
     }
-    
+
     #[test]
     fn test_retrieve_nonexistent_address() {
         let dir = TempDir::new("lager_test").unwrap();

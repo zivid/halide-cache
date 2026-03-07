@@ -1,4 +1,4 @@
-use crate::{lager::SHARDING_LEVELS, Address, Lager, Result};
+use crate::{Address, Lager, Result, lager::SHARDING_LEVELS};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::time::SystemTime;

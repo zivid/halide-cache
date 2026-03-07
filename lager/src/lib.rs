@@ -38,7 +38,6 @@ impl Address {
         array.copy_from_slice(&bytes);
         Ok(Address(array))
     }
-
 }
 
 impl std::convert::TryFrom<&[u8]> for Address {
