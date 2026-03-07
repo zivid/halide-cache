@@ -113,7 +113,7 @@ fn collect_zivid_env() -> Vec<String> {
         .filter_map(|(k, v)| k.starts_with("ZIVID_").then(|| format!("{}={}", k, v)))
         .collect::<Vec<_>>();
     v.sort();
-    return v;
+    v
 }
 
 fn hash_all_dependencies_contents(

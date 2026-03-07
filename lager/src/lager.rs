@@ -6,8 +6,8 @@ use std::time::SystemTime;
 
 pub(crate) const SHARDING_LEVELS: usize = 2;
 
-const FILE_EXTENSION: &'static str = "zst";
-const DIR_EXTENSION: &'static str = "tar.zst";
+const FILE_EXTENSION: &str = "zst";
+const DIR_EXTENSION: &str = "tar.zst";
 
 pub struct Lager {
     root: PathBuf,
@@ -61,7 +61,7 @@ impl Lager {
             Ok(())
         } else {
             Err(Error::NotFound {
-                address: address.clone(),
+                address: *address,
             })
         }
     }

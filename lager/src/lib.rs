@@ -11,7 +11,6 @@ use std::fmt::Display;
 
 use std::path::PathBuf;
 
-use hex;
 use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, Error>;

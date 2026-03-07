@@ -1,5 +1,3 @@
-use tar;
-use zstd;
 
 use std::io::{BufWriter, Read, Write};
 use std::path::Path;

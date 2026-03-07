@@ -3,7 +3,6 @@ use crate::Address;
 use std::io;
 use std::path::PathBuf;
 use thiserror::Error;
-use walkdir;
 
 fn format_io_error_with_message(msg: &Option<String>, source: &io::Error) -> String {
     match msg {
@@ -36,7 +35,7 @@ impl From<io::Error> for Error {
     fn from(source: io::Error) -> Self {
         Error::Io {
             msg: None,
-            source: io::Error::new(io::ErrorKind::Other, source),
+            source: io::Error::other(source),
         }
     }
 }
