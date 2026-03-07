@@ -1,0 +1,54 @@
+name: Release
+
+permissions:
+  contents: write
+
+on:
+  push:
+    tags:
+      - v[0-9]+.*
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/create-gh-release-action@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  upload-assets:
+    needs: create-release
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+      CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cross-compilation tools
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get -y update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Install dlltool
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        run: |
+          choco install msys2
+          C:\tools\msys64\usr\bin\bash.exe -l -c "pacman -S --noconfirm --needed base-devel mingw-w64-ucrt-x86_64-toolchain mingw-w64-ucrt-x86_64-nasm"
+          echo "C:\tools\msys64\ucrt64\bin" | Out-File -Append -FilePath $env:GITHUB_PATH -Encoding utf8
+      - uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          manifest-path: halide-cache/Cargo.toml
+          bin: halide-cache
+          target: ${{ matrix.target }}
+          archive: app-$target
+          token: ${{ secrets.GITHUB_TOKEN }}
