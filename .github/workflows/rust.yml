@@ -14,7 +14,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Check format
-        run: cargo fmt --manifest-path halide-cache/Cargo.toml --check
+        run: |
+          cargo fmt --manifest-path halide-cache/Cargo.toml --check
+          cargo fmt --manifest-path lager/Cargo.toml --check
+      - name: Run clippy
+        run: |
+          cargo clippy --manifest-path halide-cache/Cargo.toml
+          cargo clippy --manifest-path lager/Cargo.toml
 
   debug-build:
     strategy:
