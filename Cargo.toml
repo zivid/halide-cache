@@ -1,0 +1,3 @@
+[workspace]
+members = ["halide-cache", "lager"]
+resolver = "3"
