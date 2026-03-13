@@ -19,27 +19,15 @@ struct Args {
 
 const MAX_CACHE_SIZE_BYTES: u64 = 10737418240; // 10 GiB
 
-fn main() {
+fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    let cache_dir = match env::var("HALIDE_CACHE_DIR") {
-        Ok(env) => env,
-        Err(e) => {
-            eprintln!("HALIDE_CACHE_DIR environment variable not set: {}", e);
-            std::process::exit(1);
-        }
-    };
+    let cache_dir = env::var("HALIDE_CACHE_DIR")?;
 
     if !Path::new(&cache_dir).exists() {
-        fs::create_dir_all(&cache_dir).unwrap();
+        fs::create_dir_all(&cache_dir)?;
     }
-    let lager = match Lager::new(Path::new(&cache_dir)) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("Failed to initialize Lager cache: {}", e);
-            std::process::exit(1);
-        }
-    };
+    let lager = Lager::new(Path::new(&cache_dir))?;
 
     let zivid_env = collect_zivid_env();
 
@@ -67,8 +55,8 @@ fn main() {
         &mut header_dependencies,
     );
 
-    let object_address = hash_vector(&object_dependencies);
-    let header_address = hash_vector(&header_dependencies);
+    let object_address = hash_vector(&object_dependencies)?;
+    let header_address = hash_vector(&header_dependencies)?;
 
     if cache_hit(
         &args.generated_object,
@@ -77,35 +65,33 @@ fn main() {
         &object_address,
         &header_address,
     ) {
-        return;
+        return Ok(());
     }
 
     let status = Command::new(&args.builder[0])
         .args(&args.builder[1..])
-        .status()
-        .expect("Failed to execute command");
+        .status()?;
 
     if status.success() {
-        lager
-            .store_at(&object_address, &args.generated_object)
-            .expect("Store at failed for the Halide object");
-        lager
-            .store_at(&header_address, &args.generated_header)
-            .expect("Store at failed for the Halide header");
+        lager.store_at(&object_address, &args.generated_object)?;
+        lager.store_at(&header_address, &args.generated_header)?;
     }
 
-    try_cleaning_up(lager);
+    try_cleaning_up(lager)?;
+
+    Ok(())
 }
 
-fn try_cleaning_up(lager: Lager) {
-    let lock = NamedLock::create("lager_lock").unwrap();
+fn try_cleaning_up(lager: Lager) -> anyhow::Result<()> {
+    let lock = NamedLock::create("lager_lock")?;
     if let Ok(_guard) = lock.lock() {
         let mut lru = LRU::new(lager);
-        lru.scan().unwrap();
+        lru.scan()?;
         if lru.lager_size() > MAX_CACHE_SIZE_BYTES {
-            lru.evict_until(MAX_CACHE_SIZE_BYTES).unwrap();
+            lru.evict_until(MAX_CACHE_SIZE_BYTES)?;
         }
     }
+    Ok(())
 }
 
 fn collect_zivid_env() -> Vec<String> {
@@ -180,13 +166,10 @@ fn compute_hash_of_file<P: AsRef<std::path::Path>>(
     Ok(hash.to_hex().to_string())
 }
 
-fn hash_vector(vector: &[String]) -> Address {
+fn hash_vector(vector: &[String]) -> lager::Result<Address> {
     let input = serialize_vector(vector);
     let mut hasher = blake3::Hasher::new();
     hasher.update(input.as_bytes());
     let hash = hasher.finalize().to_hex().to_string();
-    match hash.into_bytes().as_slice().try_into() {
-        Ok(addr) => addr,
-        Err(_) => panic!("Hash length mismatch"),
-    }
+    hash.into_bytes().as_slice().try_into()
 }
