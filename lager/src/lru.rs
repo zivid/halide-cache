@@ -86,6 +86,8 @@ impl LRU {
 
 #[cfg(test)]
 mod tests {
+    use crate::ADDRESS_SIZE;
+
     use super::*;
     use std::thread;
     use std::time::Duration;
@@ -108,9 +110,9 @@ mod tests {
         std::fs::write(&temp_file3, b"Content 3 even longer text").unwrap();
 
         // Store files in lager with different addresses
-        let addr1 = Address::from([1u8; 32]);
-        let addr2 = Address::from([2u8; 32]);
-        let addr3 = Address::from([3u8; 32]);
+        let addr1 = Address::from([1u8; ADDRESS_SIZE]);
+        let addr2 = Address::from([2u8; ADDRESS_SIZE]);
+        let addr3 = Address::from([3u8; ADDRESS_SIZE]);
 
         lager.store_at(&addr1, &temp_file1).unwrap();
         lager.store_at(&addr2, &temp_file2).unwrap();
