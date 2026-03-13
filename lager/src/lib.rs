@@ -22,17 +22,13 @@ pub struct Address([u8; ADDRESS_SIZE]);
 
 impl Address {
     pub(crate) fn from_hex(hex: &str) -> Result<Self> {
-        let bytes = hex::decode(hex).map_err(|e| Error::Runtime {
-            msg: format!("Failed to decode address: {}", hex),
-            source: Some(Box::new(e)),
-        })?;
+        let bytes = hex::decode(hex)?;
         if bytes.len() != ADDRESS_SIZE {
             return Err(Error::Runtime {
                 msg: format!(
                     "Invalid address length ({}). Only 64 byte addresses are supported.",
                     bytes.len()
                 ),
-                source: None,
             });
         }
         let mut array = [0u8; ADDRESS_SIZE];
@@ -50,7 +46,6 @@ impl std::convert::TryFrom<&[u8]> for Address {
                     "Invalid address length ({}). Only 64 byte addresses are supported.",
                     bytes.len()
                 ),
-                source: None,
             });
         }
         let mut array = [0u8; ADDRESS_SIZE];
