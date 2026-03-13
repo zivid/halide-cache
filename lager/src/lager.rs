@@ -88,6 +88,8 @@ impl Lager {
 
 #[cfg(test)]
 mod tests {
+    use crate::ADDRESS_SIZE;
+
     use super::*;
     use tempdir::TempDir;
 
@@ -106,7 +108,7 @@ mod tests {
         let temp_file_path = dir.path().join("temp_file.txt");
         std::fs::write(&temp_file_path, b"Hello, World!").unwrap();
 
-        let address = Address::from([0u8; 32]);
+        let address = Address::from([0u8; ADDRESS_SIZE]);
 
         lager.store_at(&address, &temp_file_path).unwrap();
 
@@ -127,7 +129,7 @@ mod tests {
         std::fs::write(temp_dir_path.join("file1.txt"), b"File 1").unwrap();
         std::fs::write(temp_dir_path.join("file2.txt"), b"File 2").unwrap();
 
-        let address = Address::from([1u8; 32]);
+        let address = Address::from([1u8; ADDRESS_SIZE]);
 
         lager.store_at(&address, &temp_dir_path).unwrap();
 
@@ -146,7 +148,7 @@ mod tests {
         let dir = TempDir::new("lager_test").unwrap();
         let lager = Lager::new(dir.path()).unwrap();
 
-        let address = Address::from([2u8; 32]);
+        let address = Address::from([2u8; ADDRESS_SIZE]);
         let retrieve_path = dir.path().join("nonexistent_retrieved.txt");
 
         let result = lager.retrieve(&address, &retrieve_path);

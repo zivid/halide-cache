@@ -15,8 +15,10 @@ use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+const ADDRESS_SIZE: usize = 64;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub struct Address([u8; 64]);
+pub struct Address([u8; ADDRESS_SIZE]);
 
 impl Address {
     pub(crate) fn from_hex(hex: &str) -> Result<Self> {
@@ -24,7 +26,7 @@ impl Address {
             msg: format!("Failed to decode address: {}", hex),
             source: Some(Box::new(e)),
         })?;
-        if bytes.len() != 64 {
+        if bytes.len() != ADDRESS_SIZE {
             return Err(Error::Runtime {
                 msg: format!(
                     "Invalid address length ({}). Only 64 byte addresses are supported.",
@@ -33,7 +35,7 @@ impl Address {
                 source: None,
             });
         }
-        let mut array = [0u8; 64];
+        let mut array = [0u8; ADDRESS_SIZE];
         array.copy_from_slice(&bytes);
         Ok(Address(array))
     }
@@ -42,7 +44,7 @@ impl Address {
 impl std::convert::TryFrom<&[u8]> for Address {
     type Error = Error;
     fn try_from(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() != 64 {
+        if bytes.len() != ADDRESS_SIZE {
             return Err(Error::Runtime {
                 msg: format!(
                     "Invalid address length ({}). Only 64 byte addresses are supported.",
@@ -51,13 +53,13 @@ impl std::convert::TryFrom<&[u8]> for Address {
                 source: None,
             });
         }
-        let mut array = [0u8; 64];
+        let mut array = [0u8; ADDRESS_SIZE];
         array.copy_from_slice(bytes);
         Ok(Address(array))
     }
 }
-impl From<[u8; 64]> for Address {
-    fn from(bytes: [u8; 64]) -> Self {
+impl From<[u8; ADDRESS_SIZE]> for Address {
+    fn from(bytes: [u8; ADDRESS_SIZE]) -> Self {
         Address(bytes)
     }
 }
