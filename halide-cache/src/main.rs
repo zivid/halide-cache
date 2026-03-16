@@ -64,7 +64,7 @@ fn main() -> anyhow::Result<()> {
         &lager,
         &object_address,
         &header_address,
-    ) {
+    )? {
         return Ok(());
     }
 
@@ -121,30 +121,31 @@ fn hash_all_dependencies_contents(
 }
 
 fn cache_hit(
-    generated_object: &PathBuf,
-    generated_header: &PathBuf,
+    generated_object: &Path,
+    generated_header: &Path,
     lager: &Lager,
     object_address: &Address,
     header_address: &Address,
-) -> bool {
-    match lager.retrieve(object_address, generated_object.as_path()) {
-        Ok(_) => {
-            println!("Cache hit for Halide object. {:?}", generated_object);
-            match lager.retrieve(header_address, generated_header.as_path()) {
-                Ok(_) => {
-                    println!("Cache hit for Halide header {:?}", generated_header);
-                    return true;
-                }
-                Err(e) => {
-                    eprintln!("Error for Halide header {}", e);
-                }
-            }
+) -> anyhow::Result<bool> {
+    match (
+        lager.retrieve(object_address, generated_object),
+        lager.retrieve(header_address, generated_header),
+    ) {
+        (Ok(_), Ok(_)) => {
+            println!(
+                "Cache hits for Halide objects: {:?} and {:?}",
+                generated_object, generated_header
+            );
+            Ok(true)
         }
-        Err(_) => {
-            // Cache miss, proceed to build
-        }
+        (
+            Err(lager::Error::NotFound { address: _ }),
+            Err(lager::Error::NotFound { address: _ }),
+        ) => Ok(false),
+        (Err(oe), Err(he)) => Err(anyhow::anyhow!(oe).context(he)),
+        (Ok(_), Err(e)) => Err(anyhow::anyhow!(e).context("Retrieving the object was successful")),
+        (Err(e), Ok(_)) => Err(anyhow::anyhow!(e).context("Retrieving the header was successful")),
     }
-    false
 }
 
 fn serialize_vector(vec: &[String]) -> String {
