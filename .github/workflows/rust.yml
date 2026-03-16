@@ -51,7 +51,7 @@ jobs:
           C:\tools\msys64\usr\bin\bash.exe -l -c "pacman -S --noconfirm --needed base-devel mingw-w64-ucrt-x86_64-toolchain mingw-w64-ucrt-x86_64-nasm"
           echo "C:\tools\msys64\ucrt64\bin" | Out-File -Append -FilePath $env:GITHUB_PATH -Encoding utf8
       - name: Build
-        run: cargo build --verbose --manifest-path api/Cargo.toml --target ${{ matrix.target }}
+        run: cargo build --verbose --manifest-path halide-cache/Cargo.toml --target ${{ matrix.target }}
 
   check-releasable:
     runs-on: ubuntu-22.04
