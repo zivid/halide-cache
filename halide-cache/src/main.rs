@@ -19,6 +19,39 @@ struct Args {
 
 const MAX_CACHE_SIZE_BYTES: u64 = 10737418240; // 10 GiB
 
+struct Dependencies<'a> {
+    path: &'a Path,
+    dependencies: &'a [PathBuf],
+    env: &'a [String],
+}
+
+impl<'a> Dependencies<'a> {
+    fn make_address(&self) -> anyhow::Result<lager::Address> {
+        let mut hasher = blake3::Hasher::new();
+
+        hasher.update(self.path.as_os_str().as_encoded_bytes());
+        hasher.update(&[0u8]);
+        hasher.update(&[0u8]);
+
+        for d in self.dependencies {
+            let file = std::fs::File::open(d)?;
+            hasher.update_reader(file)?;
+            hasher.update(&[0u8]);
+        }
+        hasher.update(&[0u8]);
+
+        for e in self.env {
+            hasher.update(e.as_bytes());
+            hasher.update(&[0u8]);
+        }
+        hasher.update(&[0u8]);
+
+        let mut buf = [0u8; _];
+        hasher.finalize_xof().fill(&mut buf);
+        Ok(buf.into())
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
@@ -31,33 +64,20 @@ fn main() -> anyhow::Result<()> {
 
     let zivid_env = collect_zivid_env();
 
-    let mut object_dependencies = zivid_env.clone();
-    object_dependencies.push(
-        args.generated_object
-            .clone()
-            .into_os_string()
-            .into_string()
-            .unwrap(),
-    );
+    let object_dependencies = Dependencies {
+        path: &args.generated_object,
+        dependencies: &args.dependencies,
+        env: &zivid_env,
+    };
 
-    let mut header_dependencies = zivid_env;
-    header_dependencies.push(
-        args.generated_header
-            .clone()
-            .into_os_string()
-            .into_string()
-            .unwrap(),
-    );
+    let header_dependencies = Dependencies {
+        path: &args.generated_header,
+        dependencies: &args.dependencies,
+        env: &zivid_env,
+    };
 
-    hash_all_dependencies_contents(
-        args.dependencies,
-        &mut object_dependencies,
-        &mut header_dependencies,
-    );
-
-    let object_address = hash_vector(&object_dependencies)?;
-    let header_address = hash_vector(&header_dependencies)?;
-
+    let header_address = header_dependencies.make_address()?;
+    let object_address = object_dependencies.make_address()?;
     if cache_hit(
         &args.generated_object,
         &args.generated_header,
@@ -102,24 +122,6 @@ fn collect_zivid_env() -> Vec<String> {
     v
 }
 
-fn hash_all_dependencies_contents(
-    dependencies: Vec<PathBuf>,
-    object_dependencies: &mut Vec<String>,
-    header_dependencies: &mut Vec<String>,
-) {
-    for dep in &dependencies {
-        let file_content_hash = match compute_hash_of_file(dep) {
-            Ok(hash) => hash,
-            Err(e) => {
-                eprintln!("Failed to compute hash for {:?}: {}", dependencies, e);
-                std::process::exit(1);
-            }
-        };
-        object_dependencies.push(file_content_hash.clone());
-        header_dependencies.push(file_content_hash);
-    }
-}
-
 fn cache_hit(
     generated_object: &Path,
     generated_header: &Path,
@@ -146,31 +148,4 @@ fn cache_hit(
         (Ok(_), Err(e)) => Err(anyhow::anyhow!(e).context("Retrieving the object was successful")),
         (Err(e), Ok(_)) => Err(anyhow::anyhow!(e).context("Retrieving the header was successful")),
     }
-}
-
-fn serialize_vector(vec: &[String]) -> String {
-    format!(
-        "[{}]",
-        vec.iter()
-            .map(|s| format!("\"{}\"", s))
-            .collect::<Vec<String>>()
-            .join(",")
-    )
-}
-fn compute_hash_of_file<P: AsRef<std::path::Path>>(
-    path: P,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let mut file = std::fs::File::open(path)?;
-    let mut hasher = blake3::Hasher::new();
-    std::io::copy(&mut file, &mut hasher)?;
-    let hash = hasher.finalize();
-    Ok(hash.to_hex().to_string())
-}
-
-fn hash_vector(vector: &[String]) -> lager::Result<Address> {
-    let input = serialize_vector(vector);
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(input.as_bytes());
-    let hash = hasher.finalize().to_hex().to_string();
-    hash.into_bytes().as_slice().try_into()
 }
