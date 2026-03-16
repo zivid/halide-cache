@@ -1,0 +1,21 @@
+#!/bin/bash
+
+read -r case < "$HALIDE_TEST_DEPENDENCIES/case.txt"
+read -r direction < "$HALIDE_TEST_DEPENDENCIES/direction.txt"
+
+process() {
+    cat "$1" |
+    if [[ case = upper ]]; then
+        tr '[:lower:]' '[:upper:]'
+    else
+        cat
+    fi |
+    if [[ $direction = reverse ]]; then
+        rev
+    else
+        cat
+    fi > "$2"
+}
+
+process "$1" "$2"
+process "$1" "$3"
