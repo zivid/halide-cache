@@ -60,9 +60,7 @@ impl Lager {
             compression::read_dir(destination, file)?;
             Ok(())
         } else {
-            Err(Error::NotFound {
-                address: *address,
-            })
+            Err(Error::NotFound { address: *address })
         }
     }
 
