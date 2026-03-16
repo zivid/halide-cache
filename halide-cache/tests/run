@@ -1,0 +1,148 @@
+#!/bin/bash
+
+# ---------- SETUP ----------
+
+builder=$1
+
+die() {
+    if (( $# == 1 )); then
+        printf '%s\n' "$1"
+    elif (( $# > 1 )); then
+        printf "$@"
+    fi >&2
+    exit 1
+}
+
+test_dir=$(mktemp -d) &&
+mkdir -p "$test_dir"/{cache,outputs,inputs,dependencies,temp} || exit
+echo "Using test directory: $test_dir"
+
+# The builder script uses these to change its output. It reads them directly
+# and are not part of the command line
+export HALIDE_TEST_DEPENDENCIES="$test_dir/dependencies"
+
+configure_output() {
+    echo "$1" > "$HALIDE_TEST_DEPENDENCIES/case.txt"
+    echo "$2" > "$HALIDE_TEST_DEPENDENCIES/direction.txt"
+}
+
+run_builder_with_cache() {
+    local base_name="${1##*/}"
+    local base_name="${base_name%.txt}"
+    local header="$test_dir/outputs/$base_name.h"
+    local object="$test_dir/outputs/$base_name.o"
+
+    cargo run --quiet --bin halide-cache -- \
+        --dependencies "$HALIDE_TEST_DEPENDENCIES"/*.txt "$1" \
+        --generated-object "$object" --generated-header "$header" \
+        -- "$builder" "$1" "$object" "$header" || die
+}
+
+export HALIDE_CACHE_DIR="$test_dir/cache"
+
+assert_cache_entries() {
+    local count=$(find "$HALIDE_CACHE_DIR" -type f -name '*.zst' | wc -l)
+    (( $1 == count )) || die "expected != actual: %s != %s. Expectation %s" $expected_count $count "$2"
+}
+
+expected_count=0
+base_output_content=''
+
+# ---------- TESTS  ----------
+
+base_case() {
+    configure_output normal normal
+    echo hello >"$test_dir/inputs/hello.txt"
+
+    assert_cache_entries $expected_count
+
+    run_builder_with_cache "$test_dir/inputs/hello.txt"
+    (( expected_count += 2 ))
+    assert_cache_entries $expected_count "First entries to an empty cache"
+
+    base_output_content="$(sha1sum "$test_dir/outputs/hello.o" "$test_dir/outputs/hello.h")"
+
+    run_builder_with_cache "$test_dir/inputs/hello.txt"
+    assert_cache_entries $expected_count "No changes, cache hit"
+}
+
+difference_in_dependencies() {
+    configure_output normal2 normal2 # Deps have changed but has no effect on output
+
+    (( expected_count += 2 ))
+    run_builder_with_cache "$test_dir/inputs/hello.txt"
+    assert_cache_entries $expected_count "Dependencies have changed content but input and output hasn't"
+
+    local output_content="$(sha1sum "$test_dir/outputs/hello.o" "$test_dir/outputs/hello.h")"
+    [[ $output_content = $base_output_content ]] || die 'Hashes different but they shouldn not be'
+}
+
+uppercase() {
+    configure_output uppercase normal
+
+    (( expected_count += 2 ))
+
+    run_builder_with_cache "$test_dir/inputs/hello.txt"
+    assert_cache_entries $expected_count "Dependencies and and output has changed"
+    run_builder_with_cache "$test_dir/inputs/hello.txt"
+    assert_cache_entries $expected_count "No change inputs and outputs => cache hit"
+}
+
+reverse_direction() {
+    configure_output uppercase reverse
+
+    ((expected_count += 2))
+
+    run_builder_with_cache "$test_dir/inputs/hello.txt"
+    assert_cache_entries $expected_count "Dependencies have changed, affecting output"
+    run_builder_with_cache "$test_dir/inputs/hello.txt"
+    assert_cache_entries $expected_count "No change inputs and outputs => cache hit"
+}
+
+lowercase() {
+    configure_output normal reverse
+
+    ((expected_count += 2))
+
+    run_builder_with_cache "$test_dir/inputs/hello.txt"
+    assert_cache_entries $expected_count "Dependencies have changed, affecting output"
+    run_builder_with_cache "$test_dir/inputs/hello.txt"
+    assert_cache_entries $expected_count "No change inputs and outputs => cache hit"
+}
+
+normal_direction() {
+    configure_output normal normal
+
+    run_builder_with_cache "$test_dir/inputs/hello.txt"
+    assert_cache_entries $expected_count "Dependencies have changed, affecting output, but back to a previous case"
+    run_builder_with_cache "$test_dir/inputs/hello.txt"
+    assert_cache_entries $expected_count "No change inputs and outputs => cache hit"
+}
+
+input_path_different() {
+    configure_output normal normal
+
+    echo hello > "$test_dir/inputs/different.txt"
+    ((expected_count += 2))
+    run_builder_with_cache "$test_dir/inputs/different.txt"
+    assert_cache_entries $expected_count "Path to input has changed"
+}
+
+input_content_different() {
+    configure_output normal normal
+
+    echo hello4 > "$test_dir/inputs/different.txt"
+    ((expected_count += 2))
+    run_builder_with_cache "$test_dir/inputs/different.txt"
+    assert_cache_entries $expected_count "Content of input has changed"
+}
+
+# Unfortunately the order of these matter
+base_case
+difference_in_dependencies
+uppercase
+reverse_direction
+lowercase
+normal_direction
+input_path_different
+input_content_different
