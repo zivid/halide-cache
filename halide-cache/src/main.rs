@@ -13,6 +13,8 @@ struct Args {
     generated_object: PathBuf,
     #[arg(long)]
     generated_header: PathBuf,
+    #[arg(long)]
+    base_dir: Option<PathBuf>,
     #[arg(last = true)]
     builder: Vec<String>,
 }
@@ -60,18 +62,34 @@ fn main() -> anyhow::Result<()> {
     if !Path::new(&cache_dir).exists() {
         fs::create_dir_all(&cache_dir)?;
     }
+
     let lager = Lager::new(Path::new(&cache_dir))?;
 
     let zivid_env = collect_zivid_env();
 
+    let base_dir = match args.base_dir {
+        Some(d) => d,
+        None => find_repo_root()?,
+    };
+
+    let generated_object = args
+        .generated_object
+        .strip_prefix(&base_dir)
+        .unwrap_or(&args.generated_object);
+
+    let generated_header = args
+        .generated_header
+        .strip_prefix(&base_dir)
+        .unwrap_or(&args.generated_header);
+
     let object_dependencies = Dependencies {
-        path: &args.generated_object,
+        path: generated_object,
         dependencies: &args.dependencies,
         env: &zivid_env,
     };
 
     let header_dependencies = Dependencies {
-        path: &args.generated_header,
+        path: generated_header,
         dependencies: &args.dependencies,
         env: &zivid_env,
     };
@@ -147,5 +165,18 @@ fn cache_hit(
         (Err(oe), Err(he)) => Err(anyhow::anyhow!(oe).context(he)),
         (Ok(_), Err(e)) => Err(anyhow::anyhow!(e).context("Retrieving the object was successful")),
         (Err(e), Ok(_)) => Err(anyhow::anyhow!(e).context("Retrieving the header was successful")),
+    }
+}
+
+fn find_repo_root() -> anyhow::Result<PathBuf> {
+    let mut cwd = std::env::current_dir()?;
+
+    loop {
+        if cwd.join(".git").exists() {
+            return Ok(cwd);
+        }
+        if !cwd.pop() {
+            anyhow::bail!("Could not determine root");
+        }
     }
 }
