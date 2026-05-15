@@ -1,9 +1,10 @@
 use clap::Parser;
+use dirs::home_dir;
 use lager::{Address, LRU, Lager};
 use named_lock::NamedLock;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::{env, fs};
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -15,6 +16,8 @@ struct Args {
     generated_header: PathBuf,
     #[arg(long)]
     base_dir: Option<PathBuf>,
+    #[arg(long, default_value_os_t = home_dir().unwrap().join(".cache/halide-cache"))]
+    cache_dir: PathBuf,
     #[arg(last = true)]
     builder: Vec<String>,
 }
@@ -64,9 +67,9 @@ impl<'a> Dependencies<'a> {
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    let cache_dir = env::var("HALIDE_CACHE_DIR")?;
+    let cache_dir = args.cache_dir;
 
-    if !Path::new(&cache_dir).exists() {
+    if !cache_dir.exists() {
         fs::create_dir_all(&cache_dir)?;
     }
 
