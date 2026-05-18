@@ -25,6 +25,7 @@ struct Dependencies<'a> {
     path: &'a Path,
     dependencies: &'a [PathBuf],
     env: &'a [String],
+    cmdline: &'a [&'a str],
 }
 
 impl<'a> Dependencies<'a> {
@@ -43,6 +44,12 @@ impl<'a> Dependencies<'a> {
         hasher.update(&[0u8]);
 
         for e in self.env {
+            hasher.update(e.as_bytes());
+            hasher.update(&[0u8]);
+        }
+        hasher.update(&[0u8]);
+
+        for e in self.cmdline {
             hasher.update(e.as_bytes());
             hasher.update(&[0u8]);
         }
@@ -82,16 +89,30 @@ fn main() -> anyhow::Result<()> {
         .strip_prefix(&base_dir)
         .unwrap_or(&args.generated_header);
 
+    let cmdline = args
+        .builder
+        .iter()
+        .map(|c| {
+            Path::new(c)
+                .strip_prefix(&base_dir)
+                .ok()
+                .and_then(|p| p.to_str())
+                .unwrap_or(c)
+        })
+        .collect::<Vec<&str>>();
+
     let object_dependencies = Dependencies {
         path: generated_object,
         dependencies: &args.dependencies,
         env: &zivid_env,
+        cmdline: &cmdline,
     };
 
     let header_dependencies = Dependencies {
         path: generated_header,
         dependencies: &args.dependencies,
         env: &zivid_env,
+        cmdline: &cmdline,
     };
 
     let header_address = header_dependencies.make_address()?;
