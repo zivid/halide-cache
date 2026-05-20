@@ -177,8 +177,11 @@ fn cache_hit(
     ) {
         (Ok(_), Ok(_)) => {
             println!(
-                "Cache hits for Halide objects: {:?} and {:?}",
-                generated_object, generated_header
+                "Cache hits for Halide target {}",
+                generated_object
+                    .file_prefix()
+                    .expect("Generated object has a file name")
+                    .display()
             );
             Ok(true)
         }
