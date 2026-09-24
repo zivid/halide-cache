@@ -1,8 +1,12 @@
-use crate::{Address, Lager, Result, lager::SHARDING_LEVELS};
+use crate::{Address, Lager, Result, lager::SHARDING_LEVELS, lager::TEMP_SUFFIX};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::time::SystemTime;
 use walkdir::WalkDir;
+
+/// Temporary files older than this are considered abandoned (a writer that
+/// was killed mid-upload) and are removed during a scan.
+const STALE_TEMP_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
 #[derive(Eq, PartialEq)]
 struct Item {
@@ -61,6 +65,20 @@ impl LRU {
             let metadata = entry.metadata()?;
             if metadata.is_file() {
                 let name = entry.file_name().to_string_lossy();
+                if name.contains(TEMP_SUFFIX) {
+                    // An in-progress write from another process; not part of the
+                    // cache. Unless it is old enough to be an abandoned upload, in
+                    // which case it would otherwise consume disk outside the limit forever.
+                    let stale = metadata
+                        .modified()
+                        .ok()
+                        .and_then(|m| SystemTime::now().duration_since(m).ok())
+                        .is_some_and(|age| age > STALE_TEMP_AGE);
+                    if stale {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                    continue;
+                }
                 self.size += metadata.len();
 
                 self.heap.push(Item {
@@ -146,6 +164,29 @@ mod tests {
         let evicted: Vec<_> = evicted.iter().map(|e| e.address).collect();
         assert_eq!(evicted, vec![new], "only the untouched entry is removed");
         assert!(lager.open_raw(&old).is_ok(), "the touched entry survives");
+    }
+
+    #[test]
+    fn scan_removes_stale_temp_files_and_keeps_fresh_ones() {
+        let dir = TempDir::new("lru_tmp").unwrap();
+        let root = dir.path().join("lager");
+        let shard = root.join("aa").join("bb");
+        std::fs::create_dir_all(&shard).unwrap();
+        let stale = shard.join(format!("aabb{}-1-1", TEMP_SUFFIX));
+        let fresh = shard.join(format!("aabb{}-1-2", TEMP_SUFFIX));
+        std::fs::write(&stale, b"x").unwrap();
+        std::fs::write(&fresh, b"x").unwrap();
+        std::fs::File::open(&stale)
+            .unwrap()
+            .set_modified(SystemTime::now() - STALE_TEMP_AGE - Duration::from_secs(1))
+            .unwrap();
+
+        let mut lru = LRU::new(Lager::new(&root).unwrap());
+        lru.scan().unwrap();
+        assert_eq!(lru.entries(), 0);
+        assert_eq!(lru.lager_size(), 0);
+        assert!(!stale.exists(), "stale temp file should be removed");
+        assert!(fresh.exists(), "fresh temp file should be kept");
     }
 
     #[test]
