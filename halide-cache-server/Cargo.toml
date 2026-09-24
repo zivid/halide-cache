@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 lager = { path = "../lager" }
 anyhow = "1.0.102"
-axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "json"] }
+axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "json", "query"] }
 bytesize = "2.7.0"
 clap = { version = "4.5.53", features = ["derive", "env"] }
 futures-util = { version = "0.3", default-features = false }

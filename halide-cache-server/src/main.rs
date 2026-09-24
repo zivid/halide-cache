@@ -104,6 +104,7 @@ async fn main() -> anyhow::Result<()> {
             get(blobs::get).head(blobs::head).put(blobs::put),
         )
         .route("/v1/stats", get(stats::stats))
+        .route("/v1/history", get(stats::history))
         .route("/healthz", get(|| async { "ok" }))
         .with_state(state);
 
