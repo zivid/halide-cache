@@ -14,13 +14,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Check format
-        run: |
-          cargo fmt --manifest-path halide-cache/Cargo.toml --check
-          cargo fmt --manifest-path lager/Cargo.toml --check
+        run: cargo fmt --all --check
       - name: Run clippy
-        run: |
-          cargo clippy --manifest-path halide-cache/Cargo.toml
-          cargo clippy --manifest-path lager/Cargo.toml
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   debug-build:
     strategy:
@@ -52,6 +48,40 @@ jobs:
           echo "C:\tools\msys64\ucrt64\bin" | Out-File -Append -FilePath $env:GITHUB_PATH -Encoding utf8
       - name: Build
         run: cargo build --verbose --manifest-path halide-cache/Cargo.toml --target ${{ matrix.target }}
+      - name: Build server
+        if: matrix.target != 'x86_64-pc-windows-msvc'
+        run: cargo build --verbose --manifest-path halide-cache-server/Cargo.toml --target ${{ matrix.target }}
+
+  # Static server binaries, as shipped by the release workflow.
+  server-musl-build:
+    strategy:
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.target }}
+      - name: Build server
+        run: cargo build --release --manifest-path halide-cache-server/Cargo.toml --target ${{ matrix.target }}
+      - name: Check the binary is static
+        run: |
+          file target/${{ matrix.target }}/release/halide-cache-server
+          file target/${{ matrix.target }}/release/halide-cache-server | grep -q 'static'
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit tests
+        run: cargo test --workspace --lib --bins
+      - name: End-to-end tests (client, server and concurrent clients)
+        # halide-cache/tests/run starts halide-cache-server and drives the client
+        # against it; see halide-cache/tests/run for the scenarios.
+        run: cargo test --workspace --test basic -- --nocapture
 
   check-releasable:
     runs-on: ubuntu-22.04
@@ -64,3 +94,13 @@ jobs:
           bin: halide-cache
           archive: app-$target
           target: x86_64-unknown-linux-gnu
+      - uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: x86_64-unknown-linux-musl
+      - uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          dry-run: true
+          manifest-path: halide-cache-server/Cargo.toml
+          bin: halide-cache-server
+          archive: halide-cache-server-$target
+          target: x86_64-unknown-linux-musl

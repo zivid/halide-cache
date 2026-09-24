@@ -26,23 +26,38 @@ configure_output() {
     echo "$2" > "$HALIDE_TEST_DEPENDENCIES/direction.txt"
 }
 
+# Usage: run_builder_with_cache <input> [extra halide-cache args...]
+#
+# Uses the globals $cache_dir (local cache), $out_dir (where the outputs go,
+# defaults to $test_dir/outputs) and $base_dir (what is stripped from paths
+# before hashing, defaults to $test_dir).
 run_builder_with_cache() {
-    local base_name="${1##*/}"
+    local input=$1; shift
+    local base_name="${input##*/}"
     local base_name="${base_name%.txt}"
-    local header="$test_dir/outputs/$base_name.h"
-    local object="$test_dir/outputs/$base_name.o"
+    local out="${out_dir:-$test_dir/outputs}"
+    local header="$out/$base_name.h"
+    local object="$out/$base_name.o"
+    mkdir -p "$out"
 
     cargo run --quiet --bin halide-cache -- \
-        --dependencies "$HALIDE_TEST_DEPENDENCIES"/*.txt "$1" \
+        --dependencies "$HALIDE_TEST_DEPENDENCIES"/*.txt "$input" \
+        --cache-dir "$cache_dir" --base-dir "${base_dir:-$test_dir}" "$@" \
         --generated-object "$object" --generated-header "$header" \
-        -- "$builder" "$1" "$object" "$header" || die
+        -- "$builder" "$input" "$object" "$header" || die
 }
 
-export HALIDE_CACHE_DIR="$test_dir/cache"
+# Usage: assert_output <file> <expected content>
+assert_output() {
+    [[ $(cat "$1") == "$2" ]] || die "wrong content in $1: expected '$2', got '$(cat "$1")'"
+}
 
+cache_dir="$test_dir/cache"
+
+# Usage: assert_cache_entries <expected> <message> [dir]
 assert_cache_entries() {
-    local count=$(find "$HALIDE_CACHE_DIR" -type f -name '*.zst' | wc -l)
-    (( $1 == count )) || die "expected != actual: %s != %s. Expectation %s" $expected_count $count "$2"
+    local count=$(find "${3:-$cache_dir}" -type f -name '*.zst' | wc -l)
+    (( $1 == count )) || die "expected != actual: %s != %s. Expectation %s" $1 $count "$2"
 }
 
 expected_count=0
@@ -137,6 +152,243 @@ input_content_different() {
     assert_cache_entries $expected_count "Content of input has changed"
 }
 
+# ---------- REMOTE TESTS ----------
+
+server_pid=
+server_dir="$test_dir/server"
+server_url=
+token=s3cret
+
+# Usage: start_server [extra server args...]
+#
+# Runs the built binary directly rather than through `cargo run`, so that
+# $server_pid is the server itself and stop_server really stops it.
+start_server() {
+    mkdir -p "$server_dir"
+    cargo build --quiet -p halide-cache-server || die "cannot build the server"
+    local target_dir
+    target_dir=$(cargo metadata --format-version 1 --no-deps | sed 's/.*"target_directory":"\([^"]*\)".*/\1/')
+    local server_bin="$target_dir/debug/halide-cache-server"
+    [[ -x $server_bin ]] || die "server binary not found at $server_bin"
+    # Pick a free port by binding to 0 is not possible from bash; try random ports.
+    local port
+    for _ in 1 2 3 4 5; do
+        port=$(( 20000 + RANDOM % 20000 ))
+        "$server_bin" \
+            --listen "127.0.0.1:$port" --data-dir "$server_dir" --token "$token" \
+            "$@" >>"$test_dir/server.log" 2>&1 &
+        server_pid=$!
+        server_url="http://127.0.0.1:$port"
+        for _ in $(seq 50); do
+            if curl -fs "$server_url/healthz" >/dev/null 2>&1; then
+                return
+            fi
+            kill -0 "$server_pid" 2>/dev/null || break
+            sleep 0.1
+        done
+        kill "$server_pid" 2>/dev/null; wait "$server_pid" 2>/dev/null
+    done
+    die "could not start halide-cache-server: $(cat "$test_dir/server.log")"
+}
+
+stop_server() {
+    [[ -n $server_pid ]] || return 0
+    kill "$server_pid" 2>/dev/null
+    wait "$server_pid" 2>/dev/null
+    # The port must really be closed, otherwise the outage test below would
+    # talk to a survivor.
+    curl -fs "$server_url/healthz" >/dev/null 2>&1 && die "server still answering after stop"
+    server_pid=
+}
+
+trap stop_server EXIT
+
+remote_populate() {
+    configure_output normal normal
+    echo remote >"$test_dir/inputs/remote.txt"
+    cache_dir="$test_dir/cache_a"; mkdir -p "$cache_dir"
+
+    run_builder_with_cache "$test_dir/inputs/remote.txt" --remote "$server_url" --remote-token "$token"
+    assert_cache_entries 2 "Local cache populated" "$cache_dir"
+    assert_cache_entries 2 "Server populated by upload" "$server_dir"
+    base_output_content="$(sha1sum "$test_dir/outputs/remote.o" "$test_dir/outputs/remote.h")"
+}
+
+remote_hit_from_empty_local_cache() {
+    cache_dir="$test_dir/cache_b"; mkdir -p "$cache_dir"
+    rm -f "$test_dir/outputs/remote.o" "$test_dir/outputs/remote.h"
+
+    local out
+    out=$(run_builder_with_cache "$test_dir/inputs/remote.txt" --remote "$server_url")
+    [[ $out == *"Remote cache hits"* ]] || die "expected a remote hit, got: $out"
+    assert_cache_entries 2 "Remote hit stored locally" "$cache_dir"
+    local output_content="$(sha1sum "$test_dir/outputs/remote.o" "$test_dir/outputs/remote.h")"
+    [[ $output_content = $base_output_content ]] || die 'Outputs from remote differ from the originals'
+
+    # Second run: local hit, remote untouched.
+    out=$(run_builder_with_cache "$test_dir/inputs/remote.txt" --remote "$server_url")
+    [[ $out == *"Cache hits"* && $out != *"Remote"* ]] || die "expected a local hit, got: $out"
+}
+
+# Raw uploads are capped by --max-blob-size, including chunked ones without a
+# Content-Length, and the server keeps working afterwards.
+remote_oversized_upload_is_rejected() {
+    stop_server
+    server_dir="$test_dir/server_small_blobs"
+    start_server --evict-interval 3600 --max-blob-size 1KiB
+    local addr=$(printf 'a%.0s' $(seq 128)) code
+
+    code=$(head -c 4096 /dev/urandom | curl -s -o /dev/null -w '%{http_code}' -X PUT \
+        -H "Authorization: Bearer $token" -H 'x-lager-kind: file' -H 'Transfer-Encoding: chunked' \
+        --data-binary @- "$server_url/v1/blobs/$addr")
+    [[ $code == 413 ]] || die "expected 413 for a chunked oversized upload, got $code"
+    code=$(head -c 4096 /dev/urandom | curl -s -o /dev/null -w '%{http_code}' -X PUT \
+        -H "Authorization: Bearer $token" -H 'x-lager-kind: file' \
+        --data-binary @- "$server_url/v1/blobs/$addr")
+    [[ $code == 413 ]] || die "expected 413 for an oversized upload, got $code"
+    assert_cache_entries 0 "Nothing stored from rejected uploads" "$server_dir"
+    [[ -z $(find "$server_dir" -name '*.tmp-*') ]] || die "temporary files left by rejected uploads"
+
+    code=$(head -c 512 /dev/urandom | curl -s -o /dev/null -w '%{http_code}' -X PUT \
+        -H "Authorization: Bearer $token" -H 'x-lager-kind: file' \
+        --data-binary @- "$server_url/v1/blobs/$addr")
+    [[ $code == 201 ]] || die "expected 201 for a small upload after rejections, got $code"
+
+    stop_server
+    server_dir="$test_dir/server"
+    start_server --evict-interval 3600
+}
+
+remote_read_only_does_not_upload() {
+    cache_dir="$test_dir/cache_c"; mkdir -p "$cache_dir"
+    echo readonly >"$test_dir/inputs/readonly.txt"
+
+    run_builder_with_cache "$test_dir/inputs/readonly.txt" --remote "$server_url" --remote-token "$token" --remote-read-only
+    assert_cache_entries 2 "Built locally" "$cache_dir"
+    assert_cache_entries 2 "Read-only client did not upload" "$server_dir"
+}
+
+remote_upload_without_token_is_rejected_but_build_succeeds() {
+    cache_dir="$test_dir/cache_d"; mkdir -p "$cache_dir"
+    echo notoken >"$test_dir/inputs/notoken.txt"
+
+    local err
+    err=$(run_builder_with_cache "$test_dir/inputs/notoken.txt" --remote "$server_url" 2>&1 >/dev/null)
+    [[ $err == *"upload to remote failed"* ]] || die "expected an upload warning, got: $err"
+    assert_cache_entries 2 "Built locally" "$cache_dir"
+    assert_cache_entries 2 "Unauthorised upload rejected" "$server_dir"
+}
+
+# Two clients on different machines (simulated by separate local caches) build
+# the same kernel at the same time, then two more clients pick it up.
+remote_two_clients_concurrently() {
+    configure_output normal normal
+    echo shared >"$test_dir/inputs/shared.txt"
+    local server_before=$(find "$server_dir" -type f -name '*.zst' | wc -l)
+
+    local pids=() c
+    for c in f g; do
+        (
+            # Each client gets its own output dir so the two builders do not
+            # write the same files.
+            cache_dir="$test_dir/cache_$c" out_dir="$test_dir/outputs_$c" \
+                run_builder_with_cache "$test_dir/inputs/shared.txt" --remote "$server_url" --remote-token "$token"
+        ) &
+        pids+=($!)
+    done
+    for c in "${pids[@]}"; do wait "$c" || die "concurrent client failed"; done
+
+    assert_cache_entries 2 "Client f built or fetched" "$test_dir/cache_f"
+    assert_cache_entries 2 "Client g built or fetched" "$test_dir/cache_g"
+    # The output path is stripped to outputs_f/... vs outputs_g/..., so the two
+    # clients produce different addresses: 4 new entries on the server.
+    assert_cache_entries $(( server_before + 4 )) "Both clients uploaded, no temp files left" "$server_dir"
+    [[ -z $(find "$server_dir" -name '*.tmp-*') ]] || die "temporary upload files left on the server"
+
+    # Two fresh clients with the same output paths now hit remotely.
+    local out
+    for c in f g; do
+        rm -f "$test_dir/outputs_$c/shared.o" "$test_dir/outputs_$c/shared.h"
+        out=$(cache_dir="$test_dir/cache_${c}2" out_dir="$test_dir/outputs_$c" \
+            run_builder_with_cache "$test_dir/inputs/shared.txt" --remote "$server_url")
+        [[ $out == *"Remote cache hits"* ]] || die "expected a remote hit for client $c, got: $out"
+        assert_output "$test_dir/outputs_$c/shared.o" shared
+    done
+    assert_cache_entries $(( server_before + 4 )) "Remote hits do not upload" "$server_dir"
+
+    local stats=$(curl -fs "$server_url/v1/stats")
+    [[ $stats == *'"uploads":'* ]] || die "stats endpoint broken: $stats"
+}
+
+# A server handing out blobs that do not decompress must not fail the build.
+remote_corrupt_blob_falls_back_to_build() {
+    # Truncate every blob the server holds.
+    find "$server_dir" -type f -name '*.zst' -exec truncate -s 3 {} +
+    cache_dir="$test_dir/cache_corrupt"
+    rm -f "$test_dir/outputs_f/shared.o" "$test_dir/outputs_f/shared.h"
+
+    local err
+    err=$(out_dir="$test_dir/outputs_f" \
+        run_builder_with_cache "$test_dir/inputs/shared.txt" --remote "$server_url" --remote-token "$token" 2>&1 >/dev/null)
+    [[ $err == *"corrupt remote entries"* ]] || die "expected a corruption warning, got: $err"
+    assert_output "$test_dir/outputs_f/shared.o" shared
+    assert_cache_entries 2 "Corrupt entries replaced by the local build" "$cache_dir"
+}
+
+# Many clients race on the *same* addresses against a server so small that it
+# evicts continuously. Every client must succeed and produce correct output,
+# whether it hit, fetched, or built; the server must never hand out a truncated
+# blob (the client would fail extracting it) nor leave temp files behind.
+remote_many_clients_same_address_under_eviction() {
+    stop_server
+    server_dir="$test_dir/server_small"
+    # Each entry here compresses to 16 bytes; a 20 byte limit cannot hold both
+    # entries of one kernel, so every upload triggers an eviction pass.
+    start_server --size 20 --evict-interval 1
+
+    configure_output normal normal
+    echo racing >"$test_dir/inputs/racing.txt"
+    local n=8 round c pid pids
+
+    for round in 1 2 3; do
+        pids=()
+        for (( c = 1; c <= n; c++ )); do
+            (
+                # --base-dir strips the per-client directory, so every client
+                # hashes the same output path and computes the same two addresses.
+                out="$test_dir/outputs_race_$c"
+                cache_dir="$test_dir/cache_race_${round}_$c" out_dir="$out" base_dir="$out" \
+                    run_builder_with_cache "$test_dir/inputs/racing.txt" --remote "$server_url" --remote-token "$token" >/dev/null
+                assert_output "$out/racing.o" racing
+                assert_output "$out/racing.h" racing
+            ) &
+            pids+=($!)
+        done
+        for pid in "${pids[@]}"; do
+            wait "$pid" || die "a racing client failed or produced wrong output (round $round)"
+        done
+        [[ -z $(find "$server_dir" -name '*.tmp-*') ]] || die "temporary upload files left on the server"
+    done
+
+    local stats=$(curl -fs "$server_url/v1/stats")
+    [[ $stats == *'"evictions":0'* ]] && die "expected evictions on the tiny server, got: $stats"
+    # All clients computed the same addresses, so the server never holds more
+    # than the two entries of this kernel (plus nothing else).
+    local count=$(find "$server_dir" -type f -name '*.zst' | wc -l)
+    (( count <= 2 )) || die "expected at most 2 distinct entries, found $count"
+    kill -0 "$server_pid" || die "server died during the race: $(tail -20 "$test_dir/server.log")"
+}
+
+remote_down_falls_back_to_build() {
+    stop_server
+    cache_dir="$test_dir/cache_e"; mkdir -p "$cache_dir"
+
+    local err
+    err=$(run_builder_with_cache "$test_dir/inputs/remote.txt" --remote "$server_url" 2>&1 >/dev/null)
+    [[ $err == *"remote lookup failed"* ]] || die "expected a lookup warning, got: $err"
+    assert_cache_entries 2 "Built locally although the server is down" "$cache_dir"
+}
+
 # Unfortunately the order of these matter
 base_case
 difference_in_dependencies
@@ -146,3 +398,15 @@ lowercase
 normal_direction
 input_path_different
 input_content_different
+
+start_server --evict-interval 3600
+remote_populate
+remote_hit_from_empty_local_cache
+remote_read_only_does_not_upload
+remote_oversized_upload_is_rejected
+remote_upload_without_token_is_rejected_but_build_succeeds
+remote_two_clients_concurrently
+remote_corrupt_blob_falls_back_to_build
+remote_many_clients_same_address_under_eviction
+remote_down_falls_back_to_build
+echo "All tests passed"

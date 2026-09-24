@@ -1,0 +1,364 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>halide-cache-server</title>
+<style>
+  :root {
+    color-scheme: light;
+    --surface: #fcfcfb;
+    --surface-2: #f2f2f0;
+    --border: #dedddb;
+    --text: #0b0b0b;
+    --text-2: #52514e;
+    --text-3: #8a8985;
+    --grid: #e6e5e2;
+    --series-1: #2a78d6;  /* hits, served */
+    --series-2: #eb6834;  /* misses, received */
+    --series-3: #1baf7a;  /* size */
+    --warn: #b45309;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --surface: #1a1a19;
+      --surface-2: #242423;
+      --border: #3a3a38;
+      --text: #ffffff;
+      --text-2: #c3c2b7;
+      --text-3: #8f8e87;
+      --grid: #2f2f2d;
+      --series-1: #3987e5;
+      --series-2: #d95926;
+      --series-3: #199e70;
+      --warn: #f59e0b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px 16px 40px;
+    background: var(--surface); color: var(--text);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  header { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: baseline; margin-bottom: 20px; }
+  h1 { font-size: 20px; margin: 0; font-weight: 600; }
+  h2 { font-size: 15px; margin: 0 0 8px; font-weight: 600; }
+  .muted { color: var(--text-2); }
+  .small { font-size: 12px; color: var(--text-3); }
+  .range { margin-left: auto; display: flex; gap: 4px; }
+  .range button {
+    border: 1px solid var(--border); background: var(--surface-2); color: var(--text-2);
+    padding: 4px 10px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 13px;
+  }
+  .range button[aria-pressed="true"] { background: var(--text); color: var(--surface); border-color: var(--text); }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 24px; }
+  .tile { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; background: var(--surface-2); }
+  .tile .label { font-size: 12px; color: var(--text-2); }
+  .tile .value { font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; margin-top: 2px; }
+  .tile .sub { font-size: 12px; color: var(--text-3); margin-top: 2px; }
+  .meter { height: 6px; background: var(--grid); border-radius: 3px; overflow: hidden; margin-top: 8px; }
+  .meter > div { height: 100%; background: var(--series-3); border-radius: 3px; }
+  .meter.full > div { background: var(--warn); }
+  .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; margin-bottom: 24px; }
+  .chart { border: 1px solid var(--border); border-radius: 10px; padding: 14px; background: var(--surface); position: relative; }
+  .chart-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .legend { display: flex; gap: 14px; margin-left: auto; font-size: 12px; color: var(--text-2); }
+  .legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; background: var(--c); }
+  svg { display: block; width: 100%; height: 180px; overflow: visible; }
+  .grid line { stroke: var(--grid); stroke-width: 1; }
+  .axis text { fill: var(--text-3); font-size: 11px; }
+  .bar { rx: 4; }
+  .bar-label { fill: var(--text-2); font-size: 11px; }
+  .line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .crosshair { stroke: var(--text-3); stroke-width: 1; stroke-dasharray: 3 3; }
+  .dot { stroke: var(--surface); stroke-width: 2; }
+  .tooltip {
+    position: absolute; pointer-events: none; display: none;
+    background: var(--text); color: var(--surface); padding: 6px 9px; border-radius: 6px;
+    font-size: 12px; white-space: nowrap; z-index: 2; font-variant-numeric: tabular-nums;
+  }
+  .toggle { font-size: 12px; color: var(--text-2); background: none; border: none; cursor: pointer; text-decoration: underline; padding: 0; font-family: inherit; }
+  .empty { position: absolute; inset: 40px 14px 14px; display: flex; align-items: center; justify-content: center; color: var(--text-3); font-size: 13px; }
+  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 6px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  th { font-weight: 500; color: var(--text-2); font-size: 12px; }
+  .table-wrap { overflow-x: auto; }
+  .data-table { margin-top: 10px; max-height: 220px; overflow: auto; }
+  .data-table table { font-size: 12px; }
+  .error { color: var(--warn); }
+  section { margin-bottom: 24px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>halide-cache-server</h1>
+  <span class="muted" id="status">loading…</span>
+  <div class="range" role="group" aria-label="Time range">
+    <button data-seconds="3600" aria-pressed="true">1h</button>
+    <button data-seconds="21600" aria-pressed="false">6h</button>
+    <button data-seconds="86400" aria-pressed="false">24h</button>
+  </div>
+</header>
+
+<div class="tiles" id="tiles"></div>
+
+<div class="charts">
+  <div class="chart" id="chart-requests"></div>
+  <div class="chart" id="chart-bytes"></div>
+  <div class="chart" id="chart-size"></div>
+  <div class="chart" id="chart-ages"></div>
+</div>
+
+<section>
+  <h2>Clients</h2>
+  <p class="small">One row per source address seen since the server started. The hostname is what the client reported; behind a reverse proxy the first <code>X-Forwarded-For</code> entry is used as the address.</p>
+  <div class="table-wrap"><table id="clients"><thead><tr>
+    <th>Client</th><th>Hits</th><th>Misses</th><th>Hit rate</th><th>Uploads</th><th>Rejected</th><th>Served</th><th>Received</th><th>First seen</th><th>Last seen</th>
+  </tr></thead><tbody></tbody></table></div>
+</section>
+
+<script>
+(() => {
+  const REFRESH_MS = 15000;
+  let windowSeconds = 3600;
+  let timer;
+
+  const fmtBytes = (n) => {
+    if (n == null) return '–';
+    const u = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+    let i = 0; let v = n;
+    while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+    return (i === 0 ? v : v.toFixed(v >= 100 ? 0 : 1)) + ' ' + u[i];
+  };
+  const fmtInt = (n) => n.toLocaleString();
+  const fmtPct = (n) => (n * 100).toFixed(n >= 0.995 || n === 0 ? 0 : 1) + ' %';
+  const fmtDuration = (s) => {
+    const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+    if (d) return h ? `${d}d ${h}h` : `${d}d`;
+    if (h) return m ? `${h}h ${m}m` : `${h}h`;
+    return `${m}m`;
+  };
+  const fmtTime = (ts) => new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const fmtDateTime = (ts) => new Date(ts * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const ago = (ts) => {
+    const s = Math.max(0, Math.floor(Date.now() / 1000 - ts));
+    return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.floor(s / 60)}m ago` : fmtDuration(s) + ' ago';
+  };
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+  // Fill the window with one bucket per minute so gaps show as zero rather than
+  // being interpolated across.
+  function densify(history, seconds) {
+    const step = history.bucket_seconds;
+    const end = history.now - history.now % step;
+    const start = end - Math.ceil(seconds / step) * step + step;
+    const byTs = new Map(history.buckets.map((b) => [b.ts, b]));
+    const out = [];
+    let lastSize = null;
+    for (let ts = start; ts <= end; ts += step) {
+      const b = byTs.get(ts) || {};
+      if (b.size_bytes != null) lastSize = b.size_bytes;
+      out.push({ ts, hits: b.hits || 0, misses: b.misses || 0, uploads: b.uploads || 0,
+        bytes_served: b.bytes_served || 0, bytes_received: b.bytes_received || 0, size_bytes: lastSize });
+    }
+    return out;
+  }
+
+  function renderTiles(stats, clients) {
+    const ratio = stats.capacity_bytes ? stats.size_bytes / stats.capacity_bytes : 0;
+    const active = clients.filter((c) => Date.now() / 1000 - c.last_seen < 3600).length;
+    const tile = (label, value, sub = '', extra = '') =>
+      `<div class="tile"><div class="label">${label}</div><div class="value">${value}</div>${sub ? `<div class="sub">${sub}</div>` : ''}${extra}</div>`;
+    document.getElementById('tiles').innerHTML =
+      tile('Hit rate', fmtPct(stats.hit_rate), `${fmtInt(stats.hits)} hits · ${fmtInt(stats.misses)} misses`) +
+      tile('Cache size', fmtBytes(stats.size_bytes), `of ${fmtBytes(stats.capacity_bytes)} · ${fmtInt(stats.entries)} entries`,
+        `<div class="meter${ratio > 0.95 ? ' full' : ''}"><div style="width:${Math.min(100, ratio * 100).toFixed(1)}%"></div></div>`) +
+      tile('Uploads', fmtInt(stats.uploads), `${fmtInt(stats.duplicates)} replaced · ${fmtInt(stats.unauthorized)} rejected`) +
+      tile('Evictions', fmtInt(stats.evictions), `${fmtBytes(stats.eviction_ages.bytes_evicted)} freed by LRU`) +
+      tile('Age at eviction', stats.eviction_ages.median_seconds == null ? '–' : fmtDuration(stats.eviction_ages.median_seconds),
+        stats.eviction_ages.min_seconds == null ? 'median time unused; nothing evicted yet' : `median time unused · min ${fmtDuration(stats.eviction_ages.min_seconds)}`) +
+      tile('Traffic', fmtBytes(stats.bytes_served), `served · ${fmtBytes(stats.bytes_received)} received`) +
+      tile('Clients', fmtInt(clients.length), `${active} active in the last hour`) +
+      tile('Uptime', fmtDuration(stats.uptime_seconds), 'counters reset on restart');
+  }
+
+  // A small line chart: series = [{key, label, color}], rows = densified buckets.
+  function renderChart(id, title, series, rows, fmt, opts = {}) {
+    const el = document.getElementById(id);
+    // Size the drawing to the element so text is never stretched.
+    const W = Math.max(280, el.clientWidth - 28), H = 180, ml = 52, mr = 8, mt = 8, mb = 22;
+    const iw = W - ml - mr, ih = H - mt - mb;
+    const maxVal = Math.max(opts.floor || 0, ...rows.flatMap((r) => series.map((s) => r[s.key] ?? 0)), opts.reference || 0);
+    const niceMax = niceCeil(maxVal || 1);
+    const x = (i) => ml + (rows.length > 1 ? i / (rows.length - 1) * iw : iw / 2);
+    const y = (v) => mt + ih - (v / niceMax) * ih;
+    const ticks = [0, 0.25, 0.5, 0.75, 1].map((f) => f * niceMax);
+    const nx = Math.min(6, rows.length);
+    const xTicks = Array.from({ length: nx }, (_, k) => Math.round(k * (rows.length - 1) / Math.max(1, nx - 1)));
+    const hasData = rows.some((r) => series.some((s) => (r[s.key] ?? 0) > 0));
+    const path = (s) => rows.map((r, i) => (r[s.key] == null ? '' : `${i === 0 || rows[i - 1][s.key] == null ? 'M' : 'L'}${x(i).toFixed(1)},${y(r[s.key]).toFixed(1)}`)).join('');
+    // Isolated samples (no defined neighbour) would be invisible as a line, so
+    // mark them with a dot.
+    const isolated = (s) => rows.map((r, i) => (r[s.key] != null && (i === 0 || rows[i - 1][s.key] == null) && (i === rows.length - 1 || rows[i + 1][s.key] == null) ? `<circle cx="${x(i).toFixed(1)}" cy="${y(r[s.key]).toFixed(1)}" r="3" fill="${s.color}"/>` : '')).join('');
+
+    el.innerHTML = `
+      <div class="chart-head"><h2>${title}</h2>
+        ${series.length > 1 ? `<div class="legend">${series.map((s) => `<span style="--c:${s.color}">${s.label}</span>`).join('')}</div>` : ''}
+        <button class="toggle" type="button" aria-expanded="false">table</button>
+      </div>
+      <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="${title}">
+        <g class="grid">${ticks.map((t) => `<line x1="${ml}" x2="${W - mr}" y1="${y(t)}" y2="${y(t)}"/>`).join('')}</g>
+        <g class="axis">${ticks.map((t) => `<text x="${ml - 6}" y="${y(t) + 4}" text-anchor="end">${fmt(t, true)}</text>`).join('')}
+          ${xTicks.map((i) => `<text x="${x(i)}" y="${H - 6}" text-anchor="middle">${fmtTime(rows[i].ts)}</text>`).join('')}</g>
+        ${opts.reference ? `<line x1="${ml}" x2="${W - mr}" y1="${y(opts.reference)}" y2="${y(opts.reference)}" stroke="var(--text-3)" stroke-dasharray="4 4"/>
+          <text class="axis" x="${W - mr}" y="${y(opts.reference) - 4}" text-anchor="end" fill="var(--text-3)" font-size="11">${opts.referenceLabel}</text>` : ''}
+        ${series.map((s) => `<path class="line" stroke="${s.color}" d="${path(s)}"/>${isolated(s)}`).join('')}
+        <line class="crosshair" y1="${mt}" y2="${mt + ih}" x1="0" x2="0" style="display:none"/>
+        ${series.map((s) => `<circle class="dot" r="4" fill="${s.color}" style="display:none"/>`).join('')}
+        <rect x="${ml}" y="${mt}" width="${iw}" height="${ih}" fill="transparent"/>
+      </svg>
+      <div class="tooltip"></div>
+      ${hasData ? '' : `<div class="empty">No activity in this window</div>`}
+      <div class="data-table" hidden><table><thead><tr><th>Time</th>${series.map((s) => `<th>${s.label}</th>`).join('')}</tr></thead>
+        <tbody>${rows.slice().reverse().filter((r) => series.some((s) => r[s.key])).slice(0, 200).map((r) =>
+          `<tr><td>${fmtDateTime(r.ts)}</td>${series.map((s) => `<td>${fmt(r[s.key] ?? 0)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+
+    const svg = el.querySelector('svg'), tip = el.querySelector('.tooltip');
+    const cross = el.querySelector('.crosshair'), dots = el.querySelectorAll('.dot');
+    const hit = el.querySelector('rect');
+    const hide = () => { tip.style.display = 'none'; cross.style.display = 'none'; dots.forEach((d) => d.style.display = 'none'); };
+    hit.addEventListener('mousemove', (ev) => {
+      const b = svg.getBoundingClientRect();
+      const px = (ev.clientX - b.left) / b.width * W;
+      const i = Math.max(0, Math.min(rows.length - 1, Math.round((px - ml) / iw * (rows.length - 1))));
+      const r = rows[i];
+      cross.setAttribute('x1', x(i)); cross.setAttribute('x2', x(i)); cross.style.display = '';
+      series.forEach((s, k) => {
+        const v = r[s.key];
+        dots[k].style.display = v == null ? 'none' : '';
+        dots[k].setAttribute('cx', x(i)); dots[k].setAttribute('cy', y(v ?? 0));
+      });
+      tip.innerHTML = `<div>${fmtDateTime(r.ts)}</div>` + series.map((s) => `<div>${s.label}: <b>${fmt(r[s.key] ?? 0)}</b></div>`).join('');
+      tip.style.display = 'block';
+      const left = ev.clientX - el.getBoundingClientRect().left;
+      tip.style.left = Math.min(left + 12, el.clientWidth - tip.offsetWidth - 8) + 'px';
+      tip.style.top = (ev.clientY - el.getBoundingClientRect().top - tip.offsetHeight - 12) + 'px';
+    });
+    hit.addEventListener('mouseleave', hide);
+    const toggle = el.querySelector('.toggle'), table = el.querySelector('.data-table');
+    toggle.addEventListener('click', () => {
+      table.hidden = !table.hidden;
+      toggle.setAttribute('aria-expanded', String(!table.hidden));
+      toggle.textContent = table.hidden ? 'table' : 'hide table';
+    });
+  }
+
+  // Horizontal bars for the eviction age histogram: one series, direct labels.
+  function renderBars(id, title, labels, counts, color, note) {
+    const el = document.getElementById(id);
+    const W = Math.max(280, el.clientWidth - 28), rowH = 24, ml = 64, mr = 56, mt = 6;
+    const H = mt + labels.length * rowH + 6;
+    const max = Math.max(1, ...counts);
+    const iw = W - ml - mr;
+    const total = counts.reduce((a, b) => a + b, 0);
+    el.innerHTML = `
+      <div class="chart-head"><h2>${title}</h2><span class="small" style="margin-left:auto">${note}</span>
+        <button class="toggle" type="button" aria-expanded="false">table</button></div>
+      <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" style="height:${H}px" role="img" aria-label="${title}">
+        ${labels.map((l, i) => {
+          const y = mt + i * rowH, w = Math.max(counts[i] ? 2 : 0, counts[i] / max * iw);
+          return `<text class="bar-label" x="${ml - 8}" y="${y + rowH / 2 + 4}" text-anchor="end">${l}</text>
+            <rect class="bar" x="${ml}" y="${y + 5}" width="${w}" height="${rowH - 10}" fill="${color}"/>
+            <text class="bar-label" x="${ml + w + 6}" y="${y + rowH / 2 + 4}">${fmtInt(counts[i])}${total ? ` <tspan fill="var(--text-3)">${fmtPct(counts[i] / total)}</tspan>` : ''}</text>`;
+        }).join('')}
+      </svg>
+      ${total ? '' : `<div class="empty" style="inset:40px 14px 14px">No evictions yet</div>`}
+      <div class="data-table" hidden><table><thead><tr><th>Unused for</th><th>Evicted</th></tr></thead>
+        <tbody>${labels.map((l, i) => `<tr><td>${l}</td><td>${fmtInt(counts[i])}</td></tr>`).join('')}</tbody></table></div>`;
+    const toggle = el.querySelector('.toggle'), table = el.querySelector('.data-table');
+    toggle.addEventListener('click', () => {
+      table.hidden = !table.hidden;
+      toggle.setAttribute('aria-expanded', String(!table.hidden));
+      toggle.textContent = table.hidden ? 'table' : 'hide table';
+    });
+  }
+
+  function niceCeil(v) {
+    const p = Math.pow(10, Math.floor(Math.log10(v)));
+    const m = v / p;
+    return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 4 ? 4 : m <= 5 ? 5 : m <= 8 ? 8 : 10) * p;
+  }
+
+  function renderClients(clients) {
+    const tbody = document.querySelector('#clients tbody');
+    if (!clients.length) {
+      tbody.innerHTML = '<tr><td colspan="10" class="small">No requests yet</td></tr>';
+      return;
+    }
+    tbody.innerHTML = clients.map((c) => {
+      const total = c.hits + c.misses;
+      const name = c.hostname ? `${esc(c.hostname)} <span class="small">${esc(c.ip)}</span>` : esc(c.ip);
+      return `<tr><td>${name}</td><td>${fmtInt(c.hits)}</td><td>${fmtInt(c.misses)}</td>
+        <td>${total ? fmtPct(c.hits / total) : '–'}</td><td>${fmtInt(c.uploads)}</td>
+        <td${c.unauthorized ? ' class="error"' : ''}>${fmtInt(c.unauthorized)}</td>
+        <td>${fmtBytes(c.bytes_served)}</td><td>${fmtBytes(c.bytes_received)}</td>
+        <td title="${fmtDateTime(c.first_seen)}">${ago(c.first_seen)}</td><td title="${fmtDateTime(c.last_seen)}">${ago(c.last_seen)}</td></tr>`;
+    }).join('');
+  }
+
+  async function refresh() {
+    const status = document.getElementById('status');
+    try {
+      const [stats, history, clients] = await Promise.all([
+        fetch('/v1/stats').then((r) => r.json()),
+        fetch(`/v1/history?seconds=${windowSeconds}`).then((r) => r.json()),
+        fetch('/v1/clients').then((r) => r.json()),
+      ]);
+      const rows = densify(history, windowSeconds);
+      const s1 = getComputedStyle(document.documentElement).getPropertyValue('--series-1').trim();
+      const s2 = getComputedStyle(document.documentElement).getPropertyValue('--series-2').trim();
+      const s3 = getComputedStyle(document.documentElement).getPropertyValue('--series-3').trim();
+      renderTiles(stats, clients);
+      renderChart('chart-requests', 'Requests per minute',
+        [{ key: 'hits', label: 'Hits', color: s1 }, { key: 'misses', label: 'Misses', color: s2 }], rows,
+        (v, axis) => axis ? fmtInt(Math.round(v)) : fmtInt(v), { floor: 4 });
+      renderChart('chart-bytes', 'Transfer per minute',
+        [{ key: 'bytes_served', label: 'Served', color: s1 }, { key: 'bytes_received', label: 'Received', color: s2 }], rows,
+        (v) => fmtBytes(v), { floor: 1024 });
+      renderChart('chart-size', 'Cache size',
+        [{ key: 'size_bytes', label: 'Size', color: s3 }], rows,
+        (v) => fmtBytes(v), { reference: stats.capacity_bytes, referenceLabel: 'capacity ' + fmtBytes(stats.capacity_bytes), floor: 1 });
+      const bounds = stats.eviction_age_bounds_seconds;
+      const ageLabels = bounds.map((b, i) => i === bounds.length - 1 ? `> ${fmtDuration(bounds[i - 1])}` : `< ${fmtDuration(b)}`);
+      renderBars('chart-ages', 'Unused time at eviction', ageLabels, stats.eviction_ages.buckets, s3,
+        'short times mean --size is too small');
+      renderClients(clients);
+      status.textContent = `updated ${new Date().toLocaleTimeString()} · refreshes every ${REFRESH_MS / 1000}s`;
+      status.classList.remove('error');
+    } catch (e) {
+      status.textContent = `could not reach server: ${e.message}`;
+      status.classList.add('error');
+    }
+  }
+
+  document.querySelectorAll('.range button').forEach((b) => b.addEventListener('click', () => {
+    windowSeconds = Number(b.dataset.seconds);
+    document.querySelectorAll('.range button').forEach((o) => o.setAttribute('aria-pressed', String(o === b)));
+    refresh();
+  }));
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', refresh);
+  let resizeTimer;
+  window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(refresh, 200); });
+
+  refresh();
+  timer = setInterval(refresh, REFRESH_MS);
+  document.addEventListener('visibilitychange', () => {
+    clearInterval(timer);
+    if (!document.hidden) { refresh(); timer = setInterval(refresh, REFRESH_MS); }
+  });
+})();
+</script>
+</body>
+</html>
