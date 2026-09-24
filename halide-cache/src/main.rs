@@ -16,6 +16,11 @@ struct Args {
     generated_header: PathBuf,
     #[arg(long)]
     base_dir: Option<PathBuf>,
+    /// Additional path prefixes to strip from output paths and builder arguments
+    /// before hashing, so that addresses are identical across machines. The base
+    /// dir is always stripped.
+    #[arg(long)]
+    strip: Vec<PathBuf>,
     #[arg(long, default_value_os_t = home_dir().unwrap().join(".cache/halide-cache"))]
     cache_dir: PathBuf,
     #[arg(last = true)]
@@ -109,7 +114,7 @@ fn main() -> anyhow::Result<()> {
         Some(d) => d,
         None => find_repo_root()?,
     };
-    let stripper = PathStripper::new(&base_dir);
+    let stripper = PathStripper::new(std::iter::once(&base_dir).chain(&args.strip));
     let cmdline: Vec<String> = args.builder.iter().map(|c| stripper.strip(c)).collect();
     let zivid_env = collect_zivid_env();
 
@@ -156,26 +161,47 @@ fn try_cleaning_up(lager: Lager) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Removes the base directory from paths before they are hashed, so that the
-/// address does not depend on where the repository is checked out.
+/// Removes machine specific path prefixes from strings before they are hashed,
+/// similar to CTCACHE_STRIP. Prefixes are removed wherever they occur inside an
+/// argument (so `--out=/repo/build/x` becomes `--out=build/x`), and path
+/// separators are normalised to `/` so Windows and Unix agree.
 struct PathStripper {
-    base_dir: PathBuf,
+    prefixes: Vec<String>,
 }
 
 impl PathStripper {
-    fn new(base_dir: &std::path::Path) -> Self {
-        PathStripper {
-            base_dir: base_dir.to_path_buf(),
-        }
+    fn new<'a, I: IntoIterator<Item = &'a PathBuf>>(prefixes: I) -> Self {
+        let mut prefixes: Vec<String> = prefixes
+            .into_iter()
+            .map(|p| {
+                let mut s = normalize_separators(&p.to_string_lossy());
+                if !s.ends_with('/') {
+                    s.push('/');
+                }
+                s
+            })
+            .filter(|s| s != "/")
+            .collect();
+        // Longest first so that nested prefixes are handled deterministically.
+        prefixes.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        prefixes.dedup();
+        PathStripper { prefixes }
     }
 
     fn strip(&self, input: &str) -> String {
-        std::path::Path::new(input)
-            .strip_prefix(&self.base_dir)
-            .ok()
-            .and_then(|p| p.to_str())
-            .unwrap_or(input)
-            .to_owned()
+        let mut s = normalize_separators(input);
+        for prefix in &self.prefixes {
+            s = s.replace(prefix, "");
+        }
+        s
+    }
+}
+
+fn normalize_separators(s: &str) -> String {
+    if cfg!(windows) {
+        s.replace('\\', "/")
+    } else {
+        s.to_owned()
     }
 }
 
@@ -223,9 +249,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn strips_base_dir_from_whole_paths() {
-        let stripper = PathStripper::new(&PathBuf::from("/home/user/repo"));
+    fn strips_prefix_anywhere_in_argument() {
+        let base = PathBuf::from("/home/user/repo");
+        let extra = PathBuf::from("/opt/conan/");
+        let stripper = PathStripper::new([&base, &extra]);
+
         assert_eq!(stripper.strip("/home/user/repo/build/x.o"), "build/x.o");
+        assert_eq!(
+            stripper.strip("--output=/home/user/repo/build/x.o"),
+            "--output=build/x.o"
+        );
+        assert_eq!(
+            stripper.strip("/opt/conan/halide/bin/gen"),
+            "halide/bin/gen"
+        );
         assert_eq!(stripper.strip("target=x86-64-linux"), "target=x86-64-linux");
+    }
+
+    #[test]
+    fn root_prefix_is_ignored() {
+        let root = PathBuf::from("/");
+        let stripper = PathStripper::new([&root]);
+        assert_eq!(stripper.strip("/usr/bin/gen"), "/usr/bin/gen");
     }
 }
