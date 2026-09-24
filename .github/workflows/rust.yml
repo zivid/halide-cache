@@ -14,13 +14,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Check format
-        run: |
-          cargo fmt --manifest-path halide-cache/Cargo.toml --check
-          cargo fmt --manifest-path lager/Cargo.toml --check
+        run: cargo fmt --all --check
       - name: Run clippy
-        run: |
-          cargo clippy --manifest-path halide-cache/Cargo.toml
-          cargo clippy --manifest-path lager/Cargo.toml
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   debug-build:
     strategy:
@@ -52,6 +48,17 @@ jobs:
           echo "C:\tools\msys64\ucrt64\bin" | Out-File -Append -FilePath $env:GITHUB_PATH -Encoding utf8
       - name: Build
         run: cargo build --verbose --manifest-path halide-cache/Cargo.toml --target ${{ matrix.target }}
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit tests
+        run: cargo test --workspace --lib --bins
+      - name: End-to-end tests
+        # halide-cache/tests/run drives the client against a fake builder; see
+        # that file for the scenarios.
+        run: cargo test --workspace --test basic -- --nocapture
 
   check-releasable:
     runs-on: ubuntu-22.04
