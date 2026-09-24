@@ -25,6 +25,15 @@ impl Ord for Item {
     }
 }
 
+/// An entry removed by `LRU::evict_until`.
+#[derive(Debug, Clone, Copy)]
+pub struct Evicted {
+    pub address: Address,
+    /// When the entry was last stored or retrieved.
+    pub last_used: SystemTime,
+    pub size: u64,
+}
+
 pub struct LRU {
     heap: BinaryHeap<Item>,
     size: u64,
@@ -51,12 +60,10 @@ impl LRU {
 
             let metadata = entry.metadata()?;
             if metadata.is_file() {
+                let name = entry.file_name().to_string_lossy();
                 self.size += metadata.len();
 
-                let name = entry.file_name().to_string_lossy();
                 self.heap.push(Item {
-                    // Everything before the first dot: `.zst` and `.tar.zst`
-                    // entries alike.
                     address: Address::from_hex(&name[..name.find('.').unwrap_or(name.len())])?,
                     modified: metadata.modified()?,
                     size: metadata.len(),
@@ -67,17 +74,34 @@ impl LRU {
         Ok(())
     }
 
-    pub fn evict_until(&mut self, target_size: u64) -> Result<()> {
+    /// Removes least recently used entries until the store is at most
+    /// `target_size` bytes. Returns what was removed.
+    ///
+    /// The scan is a snapshot: an entry may have been retrieved (touched) or
+    /// re-stored since. Such entries are skipped rather than removed, so
+    /// eviction never deletes something that is in active use. They remain
+    /// counted in the size, since they are still on disk.
+    pub fn evict_until(&mut self, target_size: u64) -> Result<Vec<Evicted>> {
+        let mut evicted = Vec::new();
         while self.size > target_size {
-            if let Some(item) = self.heap.pop() {
-                self.lager.remove(&item.address)?;
-                self.size -= item.size;
-            } else {
+            let Some(item) = self.heap.pop() else {
                 break;
+            };
+            if !self
+                .lager
+                .remove_if_unused_since(&item.address, item.modified)?
+            {
+                continue;
             }
+            self.size -= item.size;
+            evicted.push(Evicted {
+                address: item.address,
+                last_used: item.modified,
+                size: item.size,
+            });
         }
 
-        Ok(())
+        Ok(evicted)
     }
 
     pub fn lager_size(&self) -> u64 {
@@ -97,6 +121,32 @@ mod tests {
     use std::thread;
     use std::time::Duration;
     use tempdir::TempDir;
+
+    #[test]
+    fn eviction_skips_entries_used_after_the_scan() {
+        let dir = TempDir::new("lru_touch").unwrap();
+        let root = dir.path().join("lager");
+        std::fs::create_dir_all(&root).unwrap();
+        let lager = Lager::new(&root).unwrap();
+        let src = dir.path().join("f");
+        std::fs::write(&src, b"0123456789").unwrap();
+        let old = Address::from([1u8; ADDRESS_SIZE]);
+        let new = Address::from([2u8; ADDRESS_SIZE]);
+        lager.store_at(&old, &src).unwrap();
+        thread::sleep(Duration::from_millis(50));
+        lager.store_at(&new, &src).unwrap();
+
+        let mut lru = LRU::new(Lager::new(&root).unwrap());
+        lru.scan().unwrap();
+        // Between the scan and the eviction, `old` gets used.
+        thread::sleep(Duration::from_millis(50));
+        lager.retrieve(&old, &dir.path().join("out")).unwrap();
+
+        let evicted = lru.evict_until(0).unwrap();
+        let evicted: Vec<_> = evicted.iter().map(|e| e.address).collect();
+        assert_eq!(evicted, vec![new], "only the untouched entry is removed");
+        assert!(lager.open_raw(&old).is_ok(), "the touched entry survives");
+    }
 
     #[test]
     fn test_lru() {

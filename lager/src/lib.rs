@@ -5,7 +5,7 @@ mod lru;
 
 pub use crate::error::Error;
 pub use crate::lager::{Kind, Lager};
-pub use crate::lru::LRU;
+pub use crate::lru::{Evicted, LRU};
 
 use std::fmt::Display;
 

@@ -169,6 +169,36 @@ impl Lager {
         }
     }
 
+    /// Removes the entry only if it has not been stored or used since
+    /// `last_used`. Returns whether it was removed. Lets an LRU pass built from
+    /// a scan skip entries that were touched or replaced while it was running.
+    pub(crate) fn remove_if_unused_since(
+        &self,
+        address: &Address,
+        last_used: SystemTime,
+    ) -> Result<bool> {
+        let mut path = self.root.join(shard_path(address, SHARDING_LEVELS));
+        for kind in [Kind::File, Kind::Dir] {
+            path.set_extension(kind.extension());
+            let modified = match std::fs::metadata(&path) {
+                Ok(m) => m.modified()?,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            };
+            if modified > last_used {
+                return Ok(false);
+            }
+            return match std::fs::remove_file(&path) {
+                Ok(()) => Ok(true),
+                // Removed by someone else in the meantime; nothing left to free.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+                Err(e) => Err(e.into()),
+            };
+        }
+        // Already gone; nothing to free.
+        Ok(true)
+    }
+
     /// Removes the entry, whatever its kind. Removing an absent entry is not an error.
     pub fn remove(&self, address: &Address) -> Result<()> {
         let mut path = self.root.join(shard_path(address, SHARDING_LEVELS));
