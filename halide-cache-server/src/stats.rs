@@ -1,10 +1,12 @@
-//! Read-only endpoints: JSON statistics and the dashboard page.
+//! Read-only endpoints: JSON statistics for the dashboard, Prometheus text,
+//! and the dashboard page itself.
 
 use crate::AppState;
 use crate::metrics::{self, AGE_BOUNDS, Totals};
 use axum::{
     extract::{Query, State},
-    response::{Html, Json},
+    http::header,
+    response::{Html, IntoResponse, Json, Response},
 };
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -94,4 +96,111 @@ pub async fn history(
 
 pub async fn clients(State(state): State<Arc<AppState>>) -> Json<Vec<metrics::ClientStats>> {
     Json(state.metrics.clients())
+}
+
+/// Prometheus text exposition format, for scraping.
+pub async fn prometheus(State(state): State<Arc<AppState>>) -> Response {
+    let t = &state.metrics.totals;
+    let (size, entries) = state.metrics.last_scan();
+    let ages = state.metrics.eviction_ages();
+
+    let gauges = [
+        (
+            "capacity_bytes",
+            "Configured maximum cache size",
+            state.max_size,
+        ),
+        ("size_bytes", "Cache size at the last eviction pass", size),
+        (
+            "entries",
+            "Entries at the last eviction pass",
+            entries as u64,
+        ),
+        (
+            "uptime_seconds",
+            "Seconds since start",
+            state.started.elapsed().as_secs(),
+        ),
+    ];
+    let counters = [
+        (
+            "hits_total",
+            "Blob downloads that found an entry",
+            load(&t.hits),
+        ),
+        (
+            "misses_total",
+            "Blob downloads that found nothing",
+            load(&t.misses),
+        ),
+        ("uploads_total", "New entries uploaded", load(&t.uploads)),
+        (
+            "duplicate_uploads_total",
+            "Uploads replacing an existing entry",
+            load(&t.duplicates),
+        ),
+        (
+            "unauthorized_uploads_total",
+            "Uploads rejected for a missing or wrong token",
+            load(&t.unauthorized),
+        ),
+        (
+            "evictions_total",
+            "Entries removed by the LRU",
+            load(&t.evictions),
+        ),
+        (
+            "evicted_bytes_total",
+            "Bytes removed by the LRU",
+            ages.bytes_evicted,
+        ),
+        (
+            "served_bytes_total",
+            "Bytes sent to clients",
+            load(&t.bytes_served),
+        ),
+        (
+            "received_bytes_total",
+            "Bytes received from clients",
+            load(&t.bytes_received),
+        ),
+    ];
+
+    let mut out = String::new();
+    for (kind, metrics) in [("gauge", &gauges[..]), ("counter", &counters[..])] {
+        for (name, help, value) in metrics {
+            out.push_str(&format!(
+                "# HELP halide_cache_{name} {help}\n# TYPE halide_cache_{name} {kind}\nhalide_cache_{name} {value}\n"
+            ));
+        }
+    }
+
+    out.push_str(
+        "# HELP halide_cache_eviction_age_seconds Seconds since last use when an entry was evicted\n\
+         # TYPE halide_cache_eviction_age_seconds histogram\n",
+    );
+    let mut cumulative = 0;
+    for (count, bound) in ages.buckets.iter().zip(AGE_BOUNDS) {
+        cumulative += count;
+        let le = if bound == u64::MAX {
+            "+Inf".to_string()
+        } else {
+            bound.to_string()
+        };
+        out.push_str(&format!(
+            "halide_cache_eviction_age_seconds_bucket{{le=\"{le}\"}} {cumulative}\n"
+        ));
+    }
+    out.push_str(&format!(
+        "halide_cache_eviction_age_seconds_count {cumulative}\n"
+    ));
+
+    (
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        out,
+    )
+        .into_response()
 }

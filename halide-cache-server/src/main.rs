@@ -107,6 +107,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/stats", get(stats::stats))
         .route("/v1/history", get(stats::history))
         .route("/v1/clients", get(stats::clients))
+        .route("/metrics", get(stats::prometheus))
         .route("/healthz", get(|| async { "ok" }))
         .with_state(state);
 
