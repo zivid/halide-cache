@@ -1,0 +1,28 @@
+# Install:
+#   install -m 755 halide-cache-server /usr/local/bin/
+#   install -m 644 halide-cache-server.service /etc/systemd/system/
+#   echo 'HALIDE_CACHE_SERVER_TOKEN=<secret>' > /etc/halide-cache-server.env && chmod 600 /etc/halide-cache-server.env
+#   systemctl daemon-reload && systemctl enable --now halide-cache-server
+[Unit]
+Description=Halide object cache server
+Documentation=https://github.com/zivid/halide-cache
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# --require-token makes the server refuse to start unless the environment file
+# actually provides a non-empty HALIDE_CACHE_SERVER_TOKEN, so a missing,
+# misnamed or empty secret cannot silently leave uploads open to the network.
+ExecStart=/usr/local/bin/halide-cache-server --listen 0.0.0.0:8080 --data-dir /var/lib/halide-cache --size 40GiB --require-token
+EnvironmentFile=/etc/halide-cache-server.env
+DynamicUser=yes
+StateDirectory=halide-cache
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
