@@ -152,6 +152,114 @@ input_content_different() {
     assert_cache_entries $expected_count "Content of input has changed"
 }
 
+# ---------- REMOTE TESTS ----------
+
+server_pid=
+server_dir="$test_dir/server"
+server_url=
+token=s3cret
+
+# Usage: start_server [extra server args...]
+#
+# Runs the built binary directly rather than through `cargo run`, so that
+# $server_pid is the server itself and stop_server really stops it.
+start_server() {
+    mkdir -p "$server_dir"
+    cargo build --quiet -p halide-cache-server || die "cannot build the server"
+    local target_dir
+    target_dir=$(cargo metadata --format-version 1 --no-deps | sed 's/.*"target_directory":"\([^"]*\)".*/\1/')
+    local server_bin="$target_dir/debug/halide-cache-server"
+    [[ -x $server_bin ]] || die "server binary not found at $server_bin"
+    # Pick a free port by binding to 0 is not possible from bash; try random ports.
+    local port
+    for _ in 1 2 3 4 5; do
+        port=$(( 20000 + RANDOM % 20000 ))
+        "$server_bin" \
+            --listen "127.0.0.1:$port" --data-dir "$server_dir" --token "$token" \
+            "$@" >>"$test_dir/server.log" 2>&1 &
+        server_pid=$!
+        server_url="http://127.0.0.1:$port"
+        for _ in $(seq 50); do
+            if curl -fs "$server_url/healthz" >/dev/null 2>&1; then
+                return
+            fi
+            kill -0 "$server_pid" 2>/dev/null || break
+            sleep 0.1
+        done
+        kill "$server_pid" 2>/dev/null; wait "$server_pid" 2>/dev/null
+    done
+    die "could not start halide-cache-server: $(cat "$test_dir/server.log")"
+}
+
+stop_server() {
+    [[ -n $server_pid ]] || return 0
+    kill "$server_pid" 2>/dev/null
+    wait "$server_pid" 2>/dev/null
+    # The port must really be closed, otherwise the outage test below would
+    # talk to a survivor.
+    curl -fs "$server_url/healthz" >/dev/null 2>&1 && die "server still answering after stop"
+    server_pid=
+}
+
+trap stop_server EXIT
+
+remote_populate() {
+    configure_output normal normal
+    echo remote >"$test_dir/inputs/remote.txt"
+    cache_dir="$test_dir/cache_a"; mkdir -p "$cache_dir"
+
+    run_builder_with_cache "$test_dir/inputs/remote.txt" --remote "$server_url" --remote-token "$token"
+    assert_cache_entries 2 "Local cache populated" "$cache_dir"
+    assert_cache_entries 2 "Server populated by upload" "$server_dir"
+    base_output_content="$(sha1sum "$test_dir/outputs/remote.o" "$test_dir/outputs/remote.h")"
+}
+
+remote_hit_from_empty_local_cache() {
+    cache_dir="$test_dir/cache_b"; mkdir -p "$cache_dir"
+    rm -f "$test_dir/outputs/remote.o" "$test_dir/outputs/remote.h"
+
+    local out
+    out=$(run_builder_with_cache "$test_dir/inputs/remote.txt" --remote "$server_url")
+    [[ $out == *"Remote cache hits"* ]] || die "expected a remote hit, got: $out"
+    assert_cache_entries 2 "Remote hit stored locally" "$cache_dir"
+    local output_content="$(sha1sum "$test_dir/outputs/remote.o" "$test_dir/outputs/remote.h")"
+    [[ $output_content = $base_output_content ]] || die 'Outputs from remote differ from the originals'
+
+    # Second run: local hit, remote untouched.
+    out=$(run_builder_with_cache "$test_dir/inputs/remote.txt" --remote "$server_url")
+    [[ $out == *"Cache hits"* && $out != *"Remote"* ]] || die "expected a local hit, got: $out"
+}
+
+remote_read_only_does_not_upload() {
+    cache_dir="$test_dir/cache_c"; mkdir -p "$cache_dir"
+    echo readonly >"$test_dir/inputs/readonly.txt"
+
+    run_builder_with_cache "$test_dir/inputs/readonly.txt" --remote "$server_url" --remote-token "$token" --remote-read-only
+    assert_cache_entries 2 "Built locally" "$cache_dir"
+    assert_cache_entries 2 "Read-only client did not upload" "$server_dir"
+}
+
+remote_upload_without_token_is_rejected_but_build_succeeds() {
+    cache_dir="$test_dir/cache_d"; mkdir -p "$cache_dir"
+    echo notoken >"$test_dir/inputs/notoken.txt"
+
+    local err
+    err=$(run_builder_with_cache "$test_dir/inputs/notoken.txt" --remote "$server_url" 2>&1 >/dev/null)
+    [[ $err == *"upload to remote failed"* ]] || die "expected an upload warning, got: $err"
+    assert_cache_entries 2 "Built locally" "$cache_dir"
+    assert_cache_entries 2 "Unauthorised upload rejected" "$server_dir"
+}
+
+remote_down_falls_back_to_build() {
+    stop_server
+    cache_dir="$test_dir/cache_e"; mkdir -p "$cache_dir"
+
+    local err
+    err=$(run_builder_with_cache "$test_dir/inputs/remote.txt" --remote "$server_url" 2>&1 >/dev/null)
+    [[ $err == *"remote lookup failed"* ]] || die "expected a lookup warning, got: $err"
+    assert_cache_entries 2 "Built locally although the server is down" "$cache_dir"
+}
+
 # Unfortunately the order of these matter
 base_case
 difference_in_dependencies
@@ -162,4 +270,10 @@ normal_direction
 input_path_different
 input_content_different
 
+start_server --evict-interval 3600
+remote_populate
+remote_hit_from_empty_local_cache
+remote_read_only_does_not_upload
+remote_upload_without_token_is_rejected_but_build_succeeds
+remote_down_falls_back_to_build
 echo "All tests passed"

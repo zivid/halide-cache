@@ -1,3 +1,5 @@
+mod remote;
+
 use clap::Parser;
 use dirs::home_dir;
 use lager::{Address, LRU, Lager};
@@ -27,6 +29,17 @@ struct Args {
     builder_id: Option<String>,
     #[arg(long, default_value_os_t = home_dir().unwrap().join(".cache/halide-cache"))]
     cache_dir: PathBuf,
+    /// URL of a halide-cache-server, e.g. http://cache.example.com:8080. Entries
+    /// missing locally are fetched from there, and new entries are uploaded.
+    /// Failures talking to the server are reported but never fail the build.
+    #[arg(long)]
+    remote: Option<String>,
+    /// Bearer token authorising uploads to the remote.
+    #[arg(long, requires = "remote")]
+    remote_token: Option<String>,
+    /// Fetch from the remote but never upload to it.
+    #[arg(long, requires = "remote")]
+    remote_read_only: bool,
     #[arg(last = true)]
     builder: Vec<String>,
 }
@@ -121,6 +134,10 @@ impl Outputs {
     }
 }
 
+fn warn(msg: impl std::fmt::Display) {
+    eprintln!("halide-cache: warning: {msg}");
+}
+
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
@@ -155,8 +172,18 @@ fn main() -> anyhow::Result<()> {
         header: output(args.generated_header)?,
     };
 
-    if retrieve_both(&lager, &outputs)? {
-        return Ok(());
+    let remote = args
+        .remote
+        .as_deref()
+        .map(|url| remote::Remote::new(url, args.remote_token.clone()));
+
+    match lookup(&lager, remote.as_ref(), &outputs)? {
+        Lookup::LocalHit => return Ok(()),
+        Lookup::RemoteHit => {
+            // The fetch added two entries to the local cache; keep it bounded.
+            return try_cleaning_up(lager);
+        }
+        Lookup::Miss => {}
     }
 
     let status = Command::new(&args.builder[0])
@@ -167,9 +194,83 @@ fn main() -> anyhow::Result<()> {
         for o in outputs.iter() {
             lager.store_at(&o.address, &o.path)?;
         }
+        if let Some(remote) = &remote
+            && !args.remote_read_only
+        {
+            upload(remote, &lager, &outputs);
+        }
     }
 
     try_cleaning_up(lager)
+}
+
+enum Lookup {
+    LocalHit,
+    RemoteHit,
+    Miss,
+}
+
+/// Looks the outputs up locally, then on the remote. Anything the remote does
+/// wrong is a warning and a miss: a cache server problem must never fail a build.
+fn lookup(
+    lager: &Lager,
+    remote: Option<&remote::Remote>,
+    outputs: &Outputs,
+) -> anyhow::Result<Lookup> {
+    if retrieve_both(lager, outputs)? {
+        return Ok(Lookup::LocalHit);
+    }
+    let Some(remote) = remote else {
+        return Ok(Lookup::Miss);
+    };
+    if !fetch_from_remote(remote, lager, outputs) {
+        return Ok(Lookup::Miss);
+    }
+    match retrieve_both(lager, outputs) {
+        Ok(true) => {
+            println!("Remote cache hits for Halide target {}", outputs.target());
+            Ok(Lookup::RemoteHit)
+        }
+        Ok(false) => Ok(Lookup::Miss),
+        Err(e) => {
+            // The server handed us something that does not extract.
+            warn(format!("discarding corrupt remote entries: {e:#}"));
+            remove_both(lager, outputs);
+            Ok(Lookup::Miss)
+        }
+    }
+}
+
+/// Fetches both entries from the remote into the local cache. Returns true only
+/// if both were found; a partial hit is treated as a miss, and the fetched half
+/// is removed again so that the local cache never ends up with a lone entry.
+fn fetch_from_remote(remote: &remote::Remote, lager: &Lager, outputs: &Outputs) -> bool {
+    for o in outputs.iter() {
+        let found = remote.fetch_into(&o.address, lager).unwrap_or_else(|e| {
+            warn(format!("remote lookup failed: {e}"));
+            false
+        });
+        if !found {
+            remove_both(lager, outputs);
+            return false;
+        }
+    }
+    true
+}
+
+fn upload(remote: &remote::Remote, lager: &Lager, outputs: &Outputs) {
+    for o in outputs.iter() {
+        if let Err(e) = remote.upload_from(&o.address, lager) {
+            warn(format!("upload to remote failed: {e}"));
+            return;
+        }
+    }
+}
+
+fn remove_both(lager: &Lager, outputs: &Outputs) {
+    for o in outputs.iter() {
+        let _ = lager.remove(&o.address);
+    }
 }
 
 fn try_cleaning_up(lager: Lager) -> anyhow::Result<()> {
