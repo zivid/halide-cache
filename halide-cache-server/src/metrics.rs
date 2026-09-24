@@ -1,8 +1,9 @@
-//! In-memory request metrics for /v1/stats and /v1/history. Everything here is lost on restart by design: the numbers are
+//! In-memory request metrics for /v1/stats, /v1/history and /v1/clients. Everything here is lost on restart by design: the numbers are
 //! operational, not billing.
 
 use lager::Evicted;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::net::IpAddr;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -10,6 +11,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// One-minute buckets, kept for 24 hours.
 pub const BUCKET_SECONDS: u64 = 60;
 const MAX_BUCKETS: usize = 24 * 60;
+/// Upper bound on distinct client addresses we track.
+const MAX_CLIENTS: usize = 4096;
 
 #[derive(Clone, Copy, Debug)]
 pub enum Event {
@@ -33,6 +36,27 @@ pub struct Bucket {
     pub size_bytes: Option<u64>,
 }
 
+#[derive(Default, Clone, serde::Serialize)]
+pub struct ClientStats {
+    pub ip: String,
+    /// Hostname reported by the client, if any; the most recent one wins.
+    pub hostname: Option<String>,
+    pub hits: u64,
+    pub misses: u64,
+    pub uploads: u64,
+    pub unauthorized: u64,
+    pub bytes_served: u64,
+    pub bytes_received: u64,
+    pub first_seen: u64,
+    pub last_seen: u64,
+}
+
+/// Who made a request, for the client table.
+pub struct Client {
+    pub ip: IpAddr,
+    pub hostname: Option<String>,
+}
+
 #[derive(Default)]
 pub struct Totals {
     pub hits: AtomicU64,
@@ -51,6 +75,7 @@ pub struct Totals {
 pub struct Metrics {
     pub totals: Totals,
     history: Mutex<VecDeque<Bucket>>,
+    clients: Mutex<HashMap<IpAddr, ClientStats>>,
     /// (size, entries) from the latest eviction pass.
     last_scan: Mutex<(u64, usize)>,
 }
@@ -63,7 +88,7 @@ pub fn now() -> u64 {
 }
 
 /// What one request adds to the counters. Computed once per event and applied
-/// to the totals and the current history bucket alike.
+/// to the totals, the current history bucket and the client's row alike.
 #[derive(Default)]
 struct Delta {
     hits: u64,
@@ -94,7 +119,7 @@ impl Delta {
 }
 
 impl Metrics {
-    pub fn record(&self, event: Event, bytes: u64) {
+    pub fn record(&self, event: Event, client: Option<&Client>, bytes: u64) {
         let d = Delta::of(event, bytes);
         let ts = now();
 
@@ -123,6 +148,35 @@ impl Metrics {
             b.bytes_served += d.bytes_served;
             b.bytes_received += d.bytes_received;
         }
+
+        if let Some(Client { ip, hostname }) = client {
+            let mut clients = self.clients.lock().unwrap();
+            if clients.len() >= MAX_CLIENTS && !clients.contains_key(ip) {
+                // Drop the least recently seen client to make room.
+                if let Some(oldest) = clients
+                    .iter()
+                    .min_by_key(|(_, c)| c.last_seen)
+                    .map(|(ip, _)| *ip)
+                {
+                    clients.remove(&oldest);
+                }
+            }
+            let c = clients.entry(*ip).or_insert_with(|| ClientStats {
+                ip: ip.to_string(),
+                first_seen: ts,
+                ..Default::default()
+            });
+            c.last_seen = ts;
+            if hostname.is_some() {
+                c.hostname = hostname.clone();
+            }
+            c.hits += d.hits;
+            c.misses += d.misses;
+            c.uploads += d.uploads;
+            c.unauthorized += d.unauthorized;
+            c.bytes_served += d.bytes_served;
+            c.bytes_received += d.bytes_received;
+        }
     }
 
     /// Records the outcome of an eviction pass.
@@ -150,6 +204,13 @@ impl Metrics {
             .cloned()
             .collect()
     }
+
+    /// Clients, most recently active first.
+    pub fn clients(&self) -> Vec<ClientStats> {
+        let mut v: Vec<ClientStats> = self.clients.lock().unwrap().values().cloned().collect();
+        v.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then_with(|| a.ip.cmp(&b.ip)));
+        v
+    }
 }
 
 fn current_bucket(history: &mut VecDeque<Bucket>, ts: u64) -> &mut Bucket {
@@ -171,12 +232,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn records_totals_and_buckets() {
+    fn records_totals_buckets_and_clients() {
         let m = Metrics::default();
-        m.record(Event::Hit, 100);
-        m.record(Event::Miss, 0);
-        m.record(Event::Upload, 50);
-        m.record(Event::Duplicate, 50);
+        let ip: IpAddr = "10.0.0.7".parse().unwrap();
+        let anon = Client { ip, hostname: None };
+        let named = Client {
+            ip,
+            hostname: Some("build-07".into()),
+        };
+        m.record(Event::Hit, Some(&anon), 100);
+        m.record(Event::Miss, Some(&named), 0);
+        m.record(Event::Upload, Some(&anon), 50);
+        m.record(Event::Duplicate, None, 50);
 
         assert_eq!(m.totals.hits.load(Ordering::Relaxed), 1);
         assert_eq!(m.totals.uploads.load(Ordering::Relaxed), 1);
@@ -188,6 +255,13 @@ mod tests {
         assert_eq!(h[0].hits, 1);
         assert_eq!(h[0].uploads, 2);
         assert_eq!(h[0].bytes_served, 100);
+
+        let c = m.clients();
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].ip, "10.0.0.7");
+        assert_eq!(c[0].hostname.as_deref(), Some("build-07"));
+        assert_eq!(c[0].uploads, 1);
+        assert_eq!(c[0].bytes_received, 50);
     }
 
     #[test]

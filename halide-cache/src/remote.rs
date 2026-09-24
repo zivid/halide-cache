@@ -6,11 +6,14 @@ use lager::{Address, Kind, Lager};
 use std::time::Duration;
 
 const KIND_HEADER: &str = "x-lager-kind";
+/// Lets the server show a hostname next to the client address on its dashboard.
+const CLIENT_HEADER: &str = "x-halide-cache-client";
 
 pub struct Remote {
     agent: ureq::Agent,
     base_url: String,
     token: Option<String>,
+    hostname: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -41,6 +44,7 @@ impl Remote {
             agent,
             base_url: base_url.trim_end_matches('/').to_owned(),
             token,
+            hostname: gethostname::gethostname().to_string_lossy().into_owned(),
         }
     }
 
@@ -51,7 +55,11 @@ impl Remote {
     /// Downloads a blob into `lager`. Returns `Ok(false)` when the server does
     /// not have it.
     pub fn fetch_into(&self, address: &Address, lager: &Lager) -> Result<bool> {
-        let mut response = self.agent.get(self.url(address)).call()?;
+        let mut response = self
+            .agent
+            .get(self.url(address))
+            .header(CLIENT_HEADER, &self.hostname)
+            .call()?;
         match response.status().as_u16() {
             200 => {}
             404 => return Ok(false),
@@ -77,6 +85,7 @@ impl Remote {
             .agent
             .put(self.url(address))
             .header(KIND_HEADER, kind.as_str())
+            .header(CLIENT_HEADER, &self.hostname)
             .header("content-length", len.to_string());
         if let Some(token) = &self.token {
             request = request.header("authorization", format!("Bearer {token}"));

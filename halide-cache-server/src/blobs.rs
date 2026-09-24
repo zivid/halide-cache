@@ -2,7 +2,7 @@
 
 use crate::AppState;
 use crate::eviction::maybe_evict_after_upload;
-use crate::extract::BlobAddress;
+use crate::extract::{BlobAddress, ClientId};
 use crate::metrics::Event;
 use axum::{
     body::Body,
@@ -70,10 +70,11 @@ pub async fn head(
 pub async fn get(
     State(state): State<Arc<AppState>>,
     BlobAddress(address): BlobAddress,
+    ClientId(client): ClientId,
 ) -> Response {
     match open_blob(&state, address).await {
         Ok(Some(blob)) => {
-            state.metrics.record(Event::Hit, blob.len);
+            state.metrics.record(Event::Hit, Some(&client), blob.len);
             info!(%address, kind = blob.kind.as_str(), len = blob.len, "hit");
             let stream = ReaderStream::new(tokio::fs::File::from_std(blob.file));
             (
@@ -84,7 +85,7 @@ pub async fn get(
                 .into_response()
         }
         Ok(None) => {
-            state.metrics.record(Event::Miss, 0);
+            state.metrics.record(Event::Miss, Some(&client), 0);
             info!(%address, "miss");
             StatusCode::NOT_FOUND.into_response()
         }
@@ -95,10 +96,11 @@ pub async fn get(
 pub async fn put(
     State(state): State<Arc<AppState>>,
     BlobAddress(address): BlobAddress,
+    ClientId(client): ClientId,
     request: Request,
 ) -> Response {
     if !authorized(&state, request.headers()) {
-        state.metrics.record(Event::Unauthorized, 0);
+        state.metrics.record(Event::Unauthorized, Some(&client), 0);
         warn!(%address, "unauthorized upload");
         return (StatusCode::UNAUTHORIZED, "bearer token required\n").into_response();
     }
@@ -140,7 +142,7 @@ pub async fn put(
             } else {
                 (Event::Duplicate, StatusCode::OK, "replaced existing")
             };
-            state.metrics.record(event, len);
+            state.metrics.record(event, Some(&client), len);
             info!(%address, kind = kind.as_str(), len, what);
             maybe_evict_after_upload(state.clone());
             status.into_response()

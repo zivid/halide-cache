@@ -83,3 +83,7 @@ pub async fn history(
         buckets: state.metrics.history(q.seconds.min(24 * 3600)),
     })
 }
+
+pub async fn clients(State(state): State<Arc<AppState>>) -> Json<Vec<metrics::ClientStats>> {
+    Json(state.metrics.clients())
+}
