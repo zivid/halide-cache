@@ -53,10 +53,11 @@ impl LRU {
             if metadata.is_file() {
                 self.size += metadata.len();
 
+                let name = entry.file_name().to_string_lossy();
                 self.heap.push(Item {
-                    address: Address::from_hex(
-                        entry.path().file_stem().unwrap().to_str().unwrap(),
-                    )?,
+                    // Everything before the first dot: `.zst` and `.tar.zst`
+                    // entries alike.
+                    address: Address::from_hex(&name[..name.find('.').unwrap_or(name.len())])?,
                     modified: metadata.modified()?,
                     size: metadata.len(),
                 });
@@ -81,6 +82,10 @@ impl LRU {
 
     pub fn lager_size(&self) -> u64 {
         self.size
+    }
+
+    pub fn entries(&self) -> usize {
+        self.heap.len()
     }
 }
 

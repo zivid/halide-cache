@@ -4,7 +4,7 @@ mod lager;
 mod lru;
 
 pub use crate::error::Error;
-pub use crate::lager::Lager;
+pub use crate::lager::{Kind, Lager};
 pub use crate::lru::LRU;
 
 use std::fmt::Display;
@@ -21,7 +21,7 @@ const ADDRESS_SIZE: usize = 64;
 pub struct Address([u8; ADDRESS_SIZE]);
 
 impl Address {
-    pub(crate) fn from_hex(hex: &str) -> Result<Self> {
+    pub fn from_hex(hex: &str) -> Result<Self> {
         let bytes = hex::decode(hex)?;
         if bytes.len() != ADDRESS_SIZE {
             return Err(Error::Runtime {
