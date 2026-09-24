@@ -21,6 +21,10 @@ struct Args {
     /// dir is always stripped.
     #[arg(long)]
     strip: Vec<PathBuf>,
+    /// Opaque identifier of the builder (e.g. the conan reference and revision of
+    /// the Halide generator package). Hashed into the address.
+    #[arg(long)]
+    builder_id: Option<String>,
     #[arg(long, default_value_os_t = home_dir().unwrap().join(".cache/halide-cache"))]
     cache_dir: PathBuf,
     #[arg(last = true)]
@@ -29,12 +33,18 @@ struct Args {
 
 const MAX_CACHE_SIZE_BYTES: u64 = 10737418240; // 10 GiB
 
+/// Bump whenever the set or encoding of hashed inputs changes, so that entries
+/// produced by older versions can never be confused with new ones on a shared
+/// cache server.
+const KEY_SCHEME_VERSION: &str = "halide-cache-key-v2";
+
 /// Everything that goes into a cache address except the output path. Both
 /// outputs of one generator invocation share these.
 struct KeyInputs<'a> {
     dependencies: &'a [PathBuf],
     env: &'a [String],
     cmdline: &'a [String],
+    builder_id: Option<&'a str>,
 }
 
 impl KeyInputs<'_> {
@@ -50,6 +60,13 @@ impl KeyInputs<'_> {
         const GROUP_END: &[u8] = b"";
 
         let mut h = blake3::Hasher::new();
+
+        field(&mut h, KEY_SCHEME_VERSION.as_bytes());
+        // Generated objects are only valid for the platform they were built on.
+        field(&mut h, std::env::consts::OS.as_bytes());
+        field(&mut h, std::env::consts::ARCH.as_bytes());
+        field(&mut h, self.builder_id.unwrap_or("").as_bytes());
+        field(&mut h, GROUP_END);
 
         field(&mut h, path.as_bytes());
         field(&mut h, GROUP_END);
@@ -122,9 +139,15 @@ fn main() -> anyhow::Result<()> {
         dependencies: &args.dependencies,
         env: &zivid_env,
         cmdline: &cmdline,
+        builder_id: args.builder_id.as_deref(),
     };
     let output = |path: PathBuf| -> anyhow::Result<Output> {
-        let address = inputs.address_for(&stripper.strip(&path.to_string_lossy()))?;
+        // Stripping is string based; a lossy conversion could make two
+        // different paths hash alike, so refuse rather than guess.
+        let utf8 = path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("output path is not valid UTF-8: {path:?}"))?;
+        let address = inputs.address_for(&stripper.strip(utf8))?;
         Ok(Output { path, address })
     };
     let outputs = Outputs {
