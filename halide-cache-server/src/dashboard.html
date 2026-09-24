@@ -68,6 +68,8 @@
   svg { display: block; width: 100%; height: 180px; overflow: visible; }
   .grid line { stroke: var(--grid); stroke-width: 1; }
   .axis text { fill: var(--text-3); font-size: 11px; }
+  .bar { rx: 4; }
+  .bar-label { fill: var(--text-2); font-size: 11px; }
   .line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
   .crosshair { stroke: var(--text-3); stroke-width: 1; stroke-dasharray: 3 3; }
   .dot { stroke: var(--surface); stroke-width: 2; }
@@ -106,6 +108,7 @@
   <div class="chart" id="chart-requests"></div>
   <div class="chart" id="chart-bytes"></div>
   <div class="chart" id="chart-size"></div>
+  <div class="chart" id="chart-ages"></div>
 </div>
 
 <section>
@@ -173,7 +176,9 @@
       tile('Cache size', fmtBytes(stats.size_bytes), `of ${fmtBytes(stats.capacity_bytes)} · ${fmtInt(stats.entries)} entries`,
         `<div class="meter${ratio > 0.95 ? ' full' : ''}"><div style="width:${Math.min(100, ratio * 100).toFixed(1)}%"></div></div>`) +
       tile('Uploads', fmtInt(stats.uploads), `${fmtInt(stats.duplicates)} replaced · ${fmtInt(stats.unauthorized)} rejected`) +
-      tile('Evictions', fmtInt(stats.evictions), 'entries removed by LRU') +
+      tile('Evictions', fmtInt(stats.evictions), `${fmtBytes(stats.eviction_ages.bytes_evicted)} freed by LRU`) +
+      tile('Age at eviction', stats.eviction_ages.median_seconds == null ? '–' : fmtDuration(stats.eviction_ages.median_seconds),
+        stats.eviction_ages.min_seconds == null ? 'median time unused; nothing evicted yet' : `median time unused · min ${fmtDuration(stats.eviction_ages.min_seconds)}`) +
       tile('Traffic', fmtBytes(stats.bytes_served), `served · ${fmtBytes(stats.bytes_received)} received`) +
       tile('Clients', fmtInt(clients.length), `${active} active in the last hour`) +
       tile('Uptime', fmtDuration(stats.uptime_seconds), 'counters reset on restart');
@@ -250,6 +255,36 @@
     });
   }
 
+  // Horizontal bars for the eviction age histogram: one series, direct labels.
+  function renderBars(id, title, labels, counts, color, note) {
+    const el = document.getElementById(id);
+    const W = Math.max(280, el.clientWidth - 28), rowH = 24, ml = 64, mr = 56, mt = 6;
+    const H = mt + labels.length * rowH + 6;
+    const max = Math.max(1, ...counts);
+    const iw = W - ml - mr;
+    const total = counts.reduce((a, b) => a + b, 0);
+    el.innerHTML = `
+      <div class="chart-head"><h2>${title}</h2><span class="small" style="margin-left:auto">${note}</span>
+        <button class="toggle" type="button" aria-expanded="false">table</button></div>
+      <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" style="height:${H}px" role="img" aria-label="${title}">
+        ${labels.map((l, i) => {
+          const y = mt + i * rowH, w = Math.max(counts[i] ? 2 : 0, counts[i] / max * iw);
+          return `<text class="bar-label" x="${ml - 8}" y="${y + rowH / 2 + 4}" text-anchor="end">${l}</text>
+            <rect class="bar" x="${ml}" y="${y + 5}" width="${w}" height="${rowH - 10}" fill="${color}"/>
+            <text class="bar-label" x="${ml + w + 6}" y="${y + rowH / 2 + 4}">${fmtInt(counts[i])}${total ? ` <tspan fill="var(--text-3)">${fmtPct(counts[i] / total)}</tspan>` : ''}</text>`;
+        }).join('')}
+      </svg>
+      ${total ? '' : `<div class="empty" style="inset:40px 14px 14px">No evictions yet</div>`}
+      <div class="data-table" hidden><table><thead><tr><th>Unused for</th><th>Evicted</th></tr></thead>
+        <tbody>${labels.map((l, i) => `<tr><td>${l}</td><td>${fmtInt(counts[i])}</td></tr>`).join('')}</tbody></table></div>`;
+    const toggle = el.querySelector('.toggle'), table = el.querySelector('.data-table');
+    toggle.addEventListener('click', () => {
+      table.hidden = !table.hidden;
+      toggle.setAttribute('aria-expanded', String(!table.hidden));
+      toggle.textContent = table.hidden ? 'table' : 'hide table';
+    });
+  }
+
   function niceCeil(v) {
     const p = Math.pow(10, Math.floor(Math.log10(v)));
     const m = v / p;
@@ -295,6 +330,10 @@
       renderChart('chart-size', 'Cache size',
         [{ key: 'size_bytes', label: 'Size', color: s3 }], rows,
         (v) => fmtBytes(v), { reference: stats.capacity_bytes, referenceLabel: 'capacity ' + fmtBytes(stats.capacity_bytes), floor: 1 });
+      const bounds = stats.eviction_age_bounds_seconds;
+      const ageLabels = bounds.map((b, i) => i === bounds.length - 1 ? `> ${fmtDuration(bounds[i - 1])}` : `< ${fmtDuration(b)}`);
+      renderBars('chart-ages', 'Unused time at eviction', ageLabels, stats.eviction_ages.buckets, s3,
+        'short times mean --size is too small');
       renderClients(clients);
       status.textContent = `updated ${new Date().toLocaleTimeString()} · refreshes every ${REFRESH_MS / 1000}s`;
       status.classList.remove('error');

@@ -1,7 +1,7 @@
 //! Read-only endpoints: JSON statistics and the dashboard page.
 
 use crate::AppState;
-use crate::metrics::{self, Totals};
+use crate::metrics::{self, AGE_BOUNDS, Totals};
 use axum::{
     extract::{Query, State},
     response::{Html, Json},
@@ -28,6 +28,8 @@ pub struct Stats {
     evictions: u64,
     bytes_served: u64,
     bytes_received: u64,
+    eviction_ages: metrics::EvictionAges,
+    eviction_age_bounds_seconds: [u64; 6],
 }
 
 fn load(counter: &std::sync::atomic::AtomicU64) -> u64 {
@@ -56,6 +58,8 @@ pub async fn stats(State(state): State<Arc<AppState>>) -> Json<Stats> {
         evictions: load(&t.evictions),
         bytes_served: load(&t.bytes_served),
         bytes_received: load(&t.bytes_received),
+        eviction_ages: state.metrics.eviction_ages(),
+        eviction_age_bounds_seconds: AGE_BOUNDS,
     })
 }
 

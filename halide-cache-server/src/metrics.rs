@@ -1,4 +1,5 @@
-//! In-memory request metrics for /v1/stats, /v1/history and /v1/clients. Everything here is lost on restart by design: the numbers are
+//! In-memory request metrics for /v1/stats, /v1/history, /v1/clients and the
+//! dashboard. Everything here is lost on restart by design: the numbers are
 //! operational, not billing.
 
 use lager::Evicted;
@@ -71,9 +72,33 @@ pub struct Totals {
     pub bytes_since_evict: AtomicU64,
 }
 
+/// Upper bounds, in seconds, of the eviction age histogram buckets. The last
+/// bucket is open ended.
+pub const AGE_BOUNDS: [u64; 6] = [3600, 6 * 3600, 24 * 3600, 3 * 86400, 7 * 86400, u64::MAX];
+const MAX_RECENT_AGES: usize = 2000;
+
+/// How long evicted entries had gone unused when they were removed. Short
+/// ages mean the cache is too small for the working set.
+#[derive(Default, Clone, serde::Serialize)]
+pub struct EvictionAges {
+    /// Count per bucket of `AGE_BOUNDS`.
+    pub buckets: [u64; 6],
+    pub bytes_evicted: u64,
+    /// Median over the most recent evictions, if any.
+    pub median_seconds: Option<u64>,
+    pub min_seconds: Option<u64>,
+}
+
+#[derive(Default)]
+struct AgeTracker {
+    ages: EvictionAges,
+    recent: VecDeque<u64>,
+}
+
 #[derive(Default)]
 pub struct Metrics {
     pub totals: Totals,
+    ages: Mutex<AgeTracker>,
     history: Mutex<VecDeque<Bucket>>,
     clients: Mutex<HashMap<IpAddr, ClientStats>>,
     /// (size, entries) from the latest eviction pass.
@@ -184,9 +209,34 @@ impl Metrics {
         self.totals
             .evictions
             .fetch_add(evicted.len() as u64, Ordering::Relaxed);
+        if !evicted.is_empty() {
+            let now = SystemTime::now();
+            let mut t = self.ages.lock().unwrap();
+            for e in evicted {
+                let age = now
+                    .duration_since(e.last_used)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let i = AGE_BOUNDS.iter().position(|&b| age < b).unwrap_or(5);
+                t.ages.buckets[i] += 1;
+                t.ages.bytes_evicted += e.size;
+                t.recent.push_back(age);
+                while t.recent.len() > MAX_RECENT_AGES {
+                    t.recent.pop_front();
+                }
+            }
+            let mut sorted: Vec<u64> = t.recent.iter().copied().collect();
+            sorted.sort_unstable();
+            t.ages.median_seconds = Some(sorted[sorted.len() / 2]);
+            t.ages.min_seconds = sorted.first().copied();
+        }
         *self.last_scan.lock().unwrap() = (size, entries);
         let mut history = self.history.lock().unwrap();
         current_bucket(&mut history, now()).size_bytes = Some(size);
+    }
+
+    pub fn eviction_ages(&self) -> EvictionAges {
+        self.ages.lock().unwrap().ages.clone()
     }
 
     pub fn last_scan(&self) -> (u64, usize) {
@@ -262,6 +312,33 @@ mod tests {
         assert_eq!(c[0].hostname.as_deref(), Some("build-07"));
         assert_eq!(c[0].uploads, 1);
         assert_eq!(c[0].bytes_received, 50);
+    }
+
+    #[test]
+    fn eviction_ages_are_bucketed() {
+        let m = Metrics::default();
+        let evicted = |size, age_secs| Evicted {
+            address: lager::Address::from([0u8; 64]),
+            last_used: SystemTime::now() - std::time::Duration::from_secs(age_secs),
+            size,
+        };
+        m.record_scan(
+            10,
+            1,
+            &[
+                evicted(100, 60),
+                evicted(200, 7200),
+                evicted(300, 30 * 86400),
+            ],
+        );
+        let a = m.eviction_ages();
+        assert_eq!(a.buckets, [1, 1, 0, 0, 0, 1]);
+        assert_eq!(a.bytes_evicted, 600);
+        // Ages are measured at record time, so allow a second of slack.
+        assert!((7200..=7201).contains(&a.median_seconds.unwrap()));
+        assert!((60..=61).contains(&a.min_seconds.unwrap()));
+        assert_eq!(m.totals.evictions.load(Ordering::Relaxed), 3);
+        assert_eq!(m.last_scan(), (10, 1));
     }
 
     #[test]
