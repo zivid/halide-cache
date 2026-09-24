@@ -99,6 +99,7 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     let app = Router::new()
+        .route("/", get(stats::dashboard))
         .route(
             "/v1/blobs/{address}",
             get(blobs::get).head(blobs::head).put(blobs::put),

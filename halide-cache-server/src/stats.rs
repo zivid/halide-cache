@@ -1,13 +1,17 @@
-//! Read-only endpoints: JSON statistics.
+//! Read-only endpoints: JSON statistics and the dashboard page.
 
 use crate::AppState;
 use crate::metrics::{self, Totals};
 use axum::{
     extract::{Query, State},
-    response::Json,
+    response::{Html, Json},
 };
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+
+pub async fn dashboard() -> Html<&'static str> {
+    Html(include_str!("dashboard.html"))
+}
 
 #[derive(serde::Serialize)]
 pub struct Stats {
