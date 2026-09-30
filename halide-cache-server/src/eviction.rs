@@ -27,13 +27,22 @@ async fn evict(state: &AppState) {
         } else {
             Vec::new()
         };
-        Ok::<_, lager::Error>((before, evicted, lru.lager_size(), lru.entries()))
+        Ok::<_, lager::Error>((
+            before,
+            evicted,
+            lru.lager_size(),
+            lru.entries(),
+            lru.largest(),
+            lru.oldest(),
+        ))
     })
     .await;
 
     match result {
-        Ok(Ok((before, evicted, size, entries))) => {
-            state.metrics.record_scan(size, entries, &evicted);
+        Ok(Ok((before, evicted, size, entries, largest, oldest))) => {
+            state
+                .metrics
+                .record_scan(size, entries, largest, oldest, &evicted);
             info!(
                 size = %ByteSize::b(size),
                 entries,

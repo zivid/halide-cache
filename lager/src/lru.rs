@@ -124,6 +124,14 @@ impl LRU {
     pub fn entries(&self) -> usize {
         self.heap.len()
     }
+
+    pub fn largest(&self) -> u64 {
+        self.heap.iter().map(|item| item.size).max().unwrap_or(0)
+    }
+
+    pub fn oldest(&self) -> Option<SystemTime> {
+        self.heap.peek().map(|item| item.modified)
+    }
 }
 
 #[cfg(test)]
@@ -162,6 +170,15 @@ mod tests {
         let evicted: Vec<_> = evicted.iter().map(|e| e.address).collect();
         assert_eq!(evicted, vec![new], "only the untouched entry is removed");
         assert_eq!(lru.entries(), 1, "the skipped entry is still counted");
+        assert_eq!(
+            lru.largest(),
+            lru.lager_size(),
+            "the skipped entry is still the largest"
+        );
+        assert!(
+            lru.oldest().is_some(),
+            "the skipped entry is still the oldest"
+        );
         assert!(lager.retrieve(&old).is_ok(), "the touched entry survives");
     }
 
