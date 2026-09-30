@@ -1,14 +1,25 @@
-use crate::{Address, compression, shard_path};
-use crate::{Error, Result};
+use crate::{Address, Error, Result, shard_path};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 pub(crate) const SHARDING_LEVELS: usize = 2;
 
-const FILE_EXTENSION: &str = "zst";
-const DIR_EXTENSION: &str = "tar.zst";
+pub(crate) const TEMP_SUFFIX: &str = ".tmp";
+static TEMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+fn touch(path: &Path) -> std::io::Result<()> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)?
+        .set_modified(SystemTime::now())
+}
+
+fn is_not_found(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::NotFound
+}
+
+#[derive(Clone, Debug)]
 pub struct Lager {
     root: PathBuf,
 }
@@ -20,67 +31,77 @@ impl Lager {
         })
     }
 
-    pub fn store_at(&self, address: &Address, source: &Path) -> Result<()> {
-        let mut dest = self.root.join(shard_path(address, SHARDING_LEVELS));
+    fn path(&self, address: &Address) -> PathBuf {
+        self.root.join(shard_path(address, SHARDING_LEVELS))
+    }
 
+    pub fn store_at(
+        &self,
+        address: &Address,
+        write: impl FnOnce(&mut dyn std::io::Write) -> std::io::Result<()>,
+    ) -> Result<bool> {
+        let dest = self.path(address);
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        let existed = dest.exists();
 
-        if source.is_file() {
-            dest.set_extension(FILE_EXTENSION);
-            compression::write_file(source, File::create(dest)?)?;
-        } else if source.is_dir() {
-            dest.set_extension(DIR_EXTENSION);
-            compression::write_dir(source, File::create(dest)?)?;
-        } else {
-            return Err(Error::NoSuchFile {
-                path: source.to_path_buf(),
-            });
+        let seq = TEMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut tmp_name = dest.file_name().unwrap().to_os_string();
+        tmp_name.push(format!("{TEMP_SUFFIX}-{}-{seq}", std::process::id()));
+        let tmp = dest.with_file_name(tmp_name);
+
+        let result = (|| -> std::io::Result<()> {
+            let mut file = File::create_new(&tmp)?;
+            write(&mut file)?;
+            file.sync_all()?;
+            std::fs::rename(&tmp, &dest)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
         }
-
-        Ok(())
+        Ok(result.map(|_| !existed)?)
     }
 
-    pub fn retrieve(&self, address: &Address, destination: &Path) -> Result<()> {
-        let mut source = self.root.join(shard_path(address, 2));
-
-        source.set_extension(FILE_EXTENSION);
-        if source.exists() {
-            let file = File::open(source)?;
-            file.set_modified(SystemTime::now())?;
-            compression::read_file(file, destination)?;
-            return Ok(());
+    pub fn retrieve(&self, address: &Address) -> Result<File> {
+        let path = self.path(address);
+        let file = File::open(&path).map_err(|e| {
+            if is_not_found(&e) {
+                Error::NotFound { address: *address }
+            } else {
+                e.into()
+            }
+        })?;
+        if let Err(e) = touch(&path)
+            && !is_not_found(&e)
+        {
+            return Err(e.into());
         }
+        Ok(file)
+    }
 
-        source.set_extension(DIR_EXTENSION);
-        if source.exists() {
-            let file = File::open(source)?;
-            file.set_modified(SystemTime::now())?;
-            compression::read_dir(destination, file)?;
-            Ok(())
-        } else {
-            Err(Error::NotFound { address: *address })
+    pub(crate) fn remove_if_unused_since(
+        &self,
+        address: &Address,
+        last_used: SystemTime,
+    ) -> Result<bool> {
+        let path = self.path(address);
+        match std::fs::metadata(&path) {
+            Ok(m) if m.modified()? > last_used => return Ok(false),
+            Ok(_) => {}
+            Err(e) if is_not_found(&e) => return Ok(true),
+            Err(e) => return Err(e.into()),
+        }
+        self.remove(address).map(|_| true)
+    }
+
+    pub fn remove(&self, address: &Address) -> Result<()> {
+        match std::fs::remove_file(self.path(address)) {
+            Err(e) if !is_not_found(&e) => Err(e.into()),
+            _ => Ok(()),
         }
     }
 
-    pub(crate) fn remove(&self, address: &Address) -> Result<()> {
-        let mut path = self.root.join(shard_path(address, SHARDING_LEVELS));
-
-        path.set_extension(FILE_EXTENSION);
-        if path.exists() {
-            std::fs::remove_file(path)?;
-            return Ok(());
-        }
-
-        path.set_extension(DIR_EXTENSION);
-        if path.exists() {
-            std::fs::remove_file(path)?;
-            return Ok(());
-        }
-
-        Ok(())
-    }
     pub(crate) fn dir(&self) -> PathBuf {
         self.root.clone()
     }
@@ -88,70 +109,102 @@ impl Lager {
 
 #[cfg(test)]
 mod tests {
-    use crate::ADDRESS_SIZE;
-
     use super::*;
+    use crate::ADDRESS_SIZE;
+    use std::io::Read;
     use tempdir::TempDir;
 
-    #[test]
-    fn test_lager_from_path() {
-        let dir = TempDir::new("lager_test").unwrap();
+    fn read(lager: &Lager, address: &Address) -> Vec<u8> {
+        let mut content = Vec::new();
+        lager
+            .retrieve(address)
+            .unwrap()
+            .read_to_end(&mut content)
+            .unwrap();
+        content
+    }
 
-        let _lager = Lager::new(dir);
+    fn temp_files(root: &Path) -> usize {
+        walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(TEMP_SUFFIX))
+            .count()
     }
 
     #[test]
-    fn test_store_retrieve_file() {
+    fn store_and_retrieve() {
         let dir = TempDir::new("lager_test").unwrap();
         let lager = Lager::new(dir.path()).unwrap();
-
-        let temp_file_path = dir.path().join("temp_file.txt");
-        std::fs::write(&temp_file_path, b"Hello, World!").unwrap();
-
-        let address = Address::from([0u8; ADDRESS_SIZE]);
-
-        lager.store_at(&address, &temp_file_path).unwrap();
-
-        let retrieve_path = dir.path().join("retrieved_file.txt");
-        lager.retrieve(&address, &retrieve_path).unwrap();
-
-        let content = std::fs::read(&retrieve_path).unwrap();
-        assert_eq!(content, b"Hello, World!");
-    }
-
-    #[test]
-    fn test_store_retrieve_directory() {
-        let dir = TempDir::new("lager_test").unwrap();
-        let lager = Lager::new(dir.path()).unwrap();
-
-        let temp_dir_path = dir.path().join("temp_dir");
-        std::fs::create_dir(&temp_dir_path).unwrap();
-        std::fs::write(temp_dir_path.join("file1.txt"), b"File 1").unwrap();
-        std::fs::write(temp_dir_path.join("file2.txt"), b"File 2").unwrap();
-
         let address = Address::from([1u8; ADDRESS_SIZE]);
 
-        lager.store_at(&address, &temp_dir_path).unwrap();
-
-        let retrieve_path = dir.path().join("retrieved_dir");
-        std::fs::create_dir(&retrieve_path).unwrap();
-        lager.retrieve(&address, &retrieve_path).unwrap();
-
-        let content1 = std::fs::read(retrieve_path.join("file1.txt")).unwrap();
-        let content2 = std::fs::read(retrieve_path.join("file2.txt")).unwrap();
-        assert_eq!(content1, b"File 1");
-        assert_eq!(content2, b"File 2");
+        assert!(
+            lager
+                .store_at(&address, |out| out.write_all(b"one"))
+                .unwrap()
+        );
+        assert_eq!(read(&lager, &address), b"one");
+        assert!(
+            !lager
+                .store_at(&address, |out| out.write_all(b"two"))
+                .unwrap()
+        );
+        assert_eq!(read(&lager, &address), b"two");
     }
 
     #[test]
-    fn test_retrieve_nonexistent_address() {
+    fn retrieving_an_absent_entry_is_not_found() {
         let dir = TempDir::new("lager_test").unwrap();
         let lager = Lager::new(dir.path()).unwrap();
-
-        let address = Address::from([2u8; ADDRESS_SIZE]);
-        let retrieve_path = dir.path().join("nonexistent_retrieved.txt");
-
-        let result = lager.retrieve(&address, &retrieve_path);
+        let address = Address::from([3u8; ADDRESS_SIZE]);
+        let result = lager.retrieve(&address);
         assert!(matches!(result, Err(Error::NotFound { .. })));
+    }
+
+    #[test]
+    fn a_failed_write_stores_nothing() {
+        let dir = TempDir::new("lager_test").unwrap();
+        let lager = Lager::new(dir.path()).unwrap();
+        let address = Address::from([5u8; ADDRESS_SIZE]);
+
+        let result = lager.store_at(&address, |out| {
+            out.write_all(b"partial")?;
+            Err(std::io::Error::other("source failed"))
+        });
+        assert!(result.is_err());
+        assert!(matches!(
+            lager.retrieve(&address),
+            Err(Error::NotFound { .. })
+        ));
+        assert_eq!(temp_files(dir.path()), 0, "temp files left behind");
+    }
+
+    #[test]
+    fn concurrent_stores_of_same_address_do_not_collide() {
+        let dir = TempDir::new("lager_race").unwrap();
+        let root = dir.path().join("l");
+        std::fs::create_dir_all(&root).unwrap();
+        let address = Address::from([9u8; ADDRESS_SIZE]);
+
+        let handles: Vec<_> = (0..8u8)
+            .map(|i| {
+                let root = root.clone();
+                std::thread::spawn(move || {
+                    let payload = vec![i; 4096];
+                    Lager::new(&root)
+                        .unwrap()
+                        .store_at(&address, |out| out.write_all(&payload))
+                        .unwrap();
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let got = read(&Lager::new(&root).unwrap(), &address);
+        assert_eq!(got.len(), 4096);
+        assert!(got.iter().all(|b| *b == got[0]), "entry mixes two writes");
+        assert_eq!(temp_files(&root), 0, "temp files left behind");
     }
 }
