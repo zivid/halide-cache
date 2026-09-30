@@ -1,0 +1,17 @@
+[package]
+name = "halide-cache-server"
+version = "0.2.1"
+edition = "2024"
+
+[dependencies]
+lager = { path = "../lager" }
+anyhow = "1.0.102"
+axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "json"] }
+bytesize = "2.7.0"
+clap = { version = "4.5.53", features = ["derive", "env"] }
+futures-util = { version = "0.3", default-features = false }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "fs", "signal", "time", "sync"] }
+tokio-util = { version = "0.7", features = ["io", "io-util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
