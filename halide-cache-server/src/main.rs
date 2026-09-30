@@ -68,8 +68,12 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     let app = Router::new()
+        .route("/", get(stats::dashboard))
         .route("/v1/blobs/{address}", get(blobs::get).put(blobs::put))
         .route("/v1/stats", get(stats::stats))
+        .route("/v1/history", get(stats::history))
+        .route("/v1/clients", get(stats::clients))
+        .route("/metrics", get(stats::prometheus))
         .route("/healthz", get(|| async { "ok" }))
         .with_state(state);
 
@@ -80,9 +84,12 @@ async fn main() -> anyhow::Result<()> {
         size = %args.size,
         "halide-cache-server listening"
     );
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     Ok(())
 }
 

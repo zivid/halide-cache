@@ -1,9 +1,12 @@
 use lager::{Address, Lager};
 use std::time::Duration;
 
+const CLIENT_HEADER: &str = "x-halide-cache-client";
+
 pub struct Remote {
     agent: ureq::Agent,
     base_url: String,
+    hostname: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -29,6 +32,7 @@ impl Remote {
         Remote {
             agent,
             base_url: base_url.trim_end_matches('/').to_owned(),
+            hostname: gethostname::gethostname().to_string_lossy().into_owned(),
         }
     }
 
@@ -37,7 +41,11 @@ impl Remote {
     }
 
     pub fn fetch_into(&self, address: &Address, lager: &Lager) -> Result<bool> {
-        let mut response = self.agent.get(self.url(address)).call()?;
+        let mut response = self
+            .agent
+            .get(self.url(address))
+            .header(CLIENT_HEADER, &self.hostname)
+            .call()?;
         match response.status().as_u16() {
             200 => {}
             404 => return Ok(false),
@@ -55,6 +63,7 @@ impl Remote {
         let response = self
             .agent
             .put(self.url(address))
+            .header(CLIENT_HEADER, &self.hostname)
             .header("content-length", len.to_string())
             .send(&file)?;
         match response.status().as_u16() {

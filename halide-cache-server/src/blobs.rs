@@ -1,5 +1,5 @@
 use crate::AppState;
-use crate::extract::BlobAddress;
+use crate::extract::{BlobAddress, ClientId};
 use crate::metrics::Event;
 use axum::{
     body::Body,
@@ -51,10 +51,11 @@ fn blob_headers(len: u64) -> HeaderMap {
 pub async fn get(
     State(state): State<Arc<AppState>>,
     BlobAddress(address): BlobAddress,
+    ClientId(client): ClientId,
 ) -> Response {
     match open_blob(&state, address).await {
         Ok(Some(blob)) => {
-            state.metrics.record(Event::Hit, blob.len);
+            state.metrics.record(Event::Hit, &client, blob.len);
             info!(%address, len = blob.len, "hit");
             let stream = ReaderStream::new(tokio::fs::File::from_std(blob.file));
             (
@@ -65,7 +66,7 @@ pub async fn get(
                 .into_response()
         }
         Ok(None) => {
-            state.metrics.record(Event::Miss, 0);
+            state.metrics.record(Event::Miss, &client, 0);
             info!(%address, "miss");
             StatusCode::NOT_FOUND.into_response()
         }
@@ -76,6 +77,7 @@ pub async fn get(
 pub async fn put(
     State(state): State<Arc<AppState>>,
     BlobAddress(address): BlobAddress,
+    ClientId(client): ClientId,
     request: Request,
 ) -> Response {
     let body = request
@@ -100,7 +102,7 @@ pub async fn put(
             } else {
                 (Event::Duplicate, StatusCode::OK, "replaced existing")
             };
-            state.metrics.record(event, len);
+            state.metrics.record(event, &client, len);
             info!(%address, len, what);
             status.into_response()
         }
