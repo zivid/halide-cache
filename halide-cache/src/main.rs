@@ -24,10 +24,14 @@ struct Args {
 
 const MAX_CACHE_SIZE_BYTES: u64 = 10737418240; // 10 GiB
 
+const KEY_SCHEME_VERSION: &str = "halide-cache-key-v4";
+
 struct KeyInputs<'a> {
     dependencies: &'a [PathBuf],
     env: &'a [String],
     cmdline: &'a [String],
+    builder_exe: &'a Path,
+    halide: &'a Path,
 }
 
 impl KeyInputs<'_> {
@@ -39,6 +43,14 @@ impl KeyInputs<'_> {
         const GROUP_END: &[u8] = b"";
 
         let mut h = blake3::Hasher::new();
+
+        field(&mut h, KEY_SCHEME_VERSION.as_bytes());
+        field(&mut h, std::env::consts::OS.as_bytes());
+        field(&mut h, std::env::consts::ARCH.as_bytes());
+        h.update_reader(fs::File::open(self.builder_exe)?)?;
+        h.update(&[0u8]);
+        hash_package(&mut h, self.halide)?;
+        field(&mut h, GROUP_END);
 
         field(&mut h, object.as_bytes());
         field(&mut h, header.as_bytes());
@@ -64,6 +76,82 @@ impl KeyInputs<'_> {
         h.finalize_xof().fill(&mut buf);
         Ok(buf.into())
     }
+}
+
+fn hash_package(h: &mut blake3::Hasher, package: &Path) -> anyhow::Result<()> {
+    const NATIVE: [&str; 4] = ["so", "pyd", "dll", "dylib"];
+    let is_native = |p: &Path| {
+        p.extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| NATIVE.contains(&e))
+            || p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.contains(".so."))
+    };
+    let mut files: Vec<PathBuf> = walkdir::WalkDir::new(package)
+        .follow_links(true)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .map(|e| e.into_path())
+        .filter(|p| is_native(p))
+        .collect();
+    if files.is_empty() {
+        anyhow::bail!(
+            "the halide package at {} contains no native library; it is not a usable Halide install",
+            package.display()
+        );
+    }
+    files.sort();
+    for file in &files {
+        let relative = file.strip_prefix(package).unwrap_or(file);
+        h.update(normalize_separators(&relative.to_string_lossy()).as_bytes());
+        h.update(&[0u8]);
+        h.update_reader(fs::File::open(file)?)?;
+        h.update(&[0u8]);
+    }
+    Ok(())
+}
+
+fn locate_halide(python: &Path) -> anyhow::Result<PathBuf> {
+    const PROBE: &str = "import importlib.util, sys\n\
+        spec = importlib.util.find_spec('halide')\n\
+        print(spec.origin if spec is not None and spec.origin else '')";
+    let output = Command::new(python)
+        .args(["-c", PROBE])
+        .output()
+        .map_err(|e| anyhow::anyhow!("cannot run {}: {e}", python.display()))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "{} failed while locating the halide package ({}): {}",
+            python.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let origin = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if origin.is_empty() {
+        anyhow::bail!(
+            "{} cannot import halide: the Halide Python package is not installed for this interpreter",
+            python.display()
+        );
+    }
+    let origin = PathBuf::from(origin);
+    let package = if origin
+        .file_name()
+        .is_some_and(|n| n.to_str().is_some_and(|n| n.starts_with("__init__.")))
+    {
+        origin.parent().map(Path::to_path_buf).unwrap_or(origin)
+    } else {
+        origin
+    };
+    if !package.exists() {
+        anyhow::bail!(
+            "halide package reported at {} does not exist",
+            package.display()
+        );
+    }
+    Ok(package)
 }
 
 struct Outputs {
@@ -95,21 +183,29 @@ fn main() -> anyhow::Result<()> {
         Some(d) => d,
         None => find_repo_root()?,
     };
-    let cmdline: Vec<String> = args
-        .builder
-        .iter()
-        .map(|c| strip_base(&base_dir, c))
-        .collect();
+    let stripper = PathStripper::new(&base_dir);
+    let cmdline: Vec<String> = args.builder.iter().map(|c| stripper.strip(c)).collect();
     let zivid_env = collect_zivid_env();
+    let builder_exe = which::which(&args.builder[0])
+        .map_err(|e| anyhow::anyhow!("cannot locate builder {:?}: {e}", args.builder[0]))?;
+    let halide = locate_halide(&builder_exe)?;
 
     let inputs = KeyInputs {
         dependencies: &args.dependencies,
         env: &zivid_env,
         cmdline: &cmdline,
+        builder_exe: &builder_exe,
+        halide: &halide,
+    };
+    let stripped = |path: &Path| -> anyhow::Result<String> {
+        let utf8 = path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("output path is not valid UTF-8: {path:?}"))?;
+        Ok(stripper.strip(utf8))
     };
     let address = inputs.address(
-        &strip_base(&base_dir, &args.generated_object.to_string_lossy()),
-        &strip_base(&base_dir, &args.generated_header.to_string_lossy()),
+        &stripped(&args.generated_object)?,
+        &stripped(&args.generated_header)?,
     )?;
     let outputs = Outputs {
         object: args.generated_object,
@@ -144,13 +240,34 @@ fn try_cleaning_up(lager: Lager) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn strip_base(base_dir: &Path, arg: &str) -> String {
-    Path::new(arg)
-        .strip_prefix(base_dir)
-        .ok()
-        .and_then(|p| p.to_str())
-        .unwrap_or(arg)
-        .to_owned()
+struct PathStripper {
+    prefix: String,
+}
+
+impl PathStripper {
+    fn new(base_dir: &Path) -> Self {
+        let mut prefix = normalize_separators(&base_dir.to_string_lossy());
+        if !prefix.ends_with('/') {
+            prefix.push('/');
+        }
+        PathStripper { prefix }
+    }
+
+    fn strip(&self, input: &str) -> String {
+        let s = normalize_separators(input);
+        if self.prefix == "/" {
+            return s;
+        }
+        s.replace(&self.prefix, "")
+    }
+}
+
+fn normalize_separators(s: &str) -> String {
+    if cfg!(windows) {
+        s.replace('\\', "/")
+    } else {
+        s.to_owned()
+    }
 }
 
 fn collect_zivid_env() -> Vec<String> {
@@ -187,5 +304,56 @@ fn find_repo_root() -> anyhow::Result<PathBuf> {
         if !cwd.pop() {
             anyhow::bail!("Could not determine root");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_prefix_anywhere_in_argument() {
+        let stripper = PathStripper::new(Path::new("/home/user/repo"));
+
+        assert_eq!(stripper.strip("/home/user/repo/build/x.o"), "build/x.o");
+        assert_eq!(
+            stripper.strip("--output=/home/user/repo/build/x.o"),
+            "--output=build/x.o"
+        );
+        assert_eq!(stripper.strip("/opt/conan/bin/gen"), "/opt/conan/bin/gen");
+        assert_eq!(stripper.strip("target=x86-64-linux"), "target=x86-64-linux");
+    }
+
+    #[test]
+    fn the_interpreter_is_part_of_the_key() {
+        let dir = std::env::temp_dir().join(format!("halide-cache-test-{}", std::process::id()));
+        let halide = dir.join("halide");
+        fs::create_dir_all(&halide).unwrap();
+        fs::write(halide.join("halide_.so"), b"halide").unwrap();
+        let (a, b) = (dir.join("python-a"), dir.join("python-b"));
+        fs::write(&a, b"python 3.12").unwrap();
+        fs::write(&b, b"python 3.13").unwrap();
+
+        let cmdline = ["gen".to_owned()];
+        let address = |python: &Path| {
+            KeyInputs {
+                dependencies: &[],
+                env: &[],
+                cmdline: &cmdline,
+                builder_exe: python,
+                halide: &halide,
+            }
+            .address("out.o", "out.h")
+            .unwrap()
+        };
+        assert_ne!(address(&a), address(&b));
+        assert_eq!(address(&a), address(&a));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn root_prefix_is_ignored() {
+        let stripper = PathStripper::new(Path::new("/"));
+        assert_eq!(stripper.strip("/usr/bin/gen"), "/usr/bin/gen");
     }
 }
