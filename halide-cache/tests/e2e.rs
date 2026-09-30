@@ -99,6 +99,10 @@ fn entries(dir: &Path) -> usize {
     files_with(dir, |name| name.ends_with(".zst") && !name.contains(".tmp"))
 }
 
+fn temp_files(dir: &Path) -> usize {
+    files_with(dir, |name| name.contains(".tmp"))
+}
+
 const HIT: &str = "Cache hits for Halide target kernel";
 
 #[test]
@@ -201,4 +205,191 @@ fn halide_without_native_library_is_an_error() {
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("no native library"), "{stderr}");
+}
+
+#[cfg(not(windows))]
+mod remote {
+    use super::*;
+    use std::process::Child;
+    use std::sync::OnceLock;
+    use std::time::{Duration, Instant};
+
+    fn agent() -> ureq::Agent {
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(Duration::from_secs(10)))
+            .build()
+            .into()
+    }
+
+    fn server_binary() -> &'static Path {
+        static BIN: OnceLock<PathBuf> = OnceLock::new();
+        BIN.get_or_init(|| {
+            let status = Command::new(env!("CARGO"))
+                .args(["build", "--quiet", "-p", "halide-cache-server"])
+                .status()
+                .unwrap();
+            assert!(status.success(), "cannot build halide-cache-server");
+            Path::new(env!("CARGO_BIN_EXE_halide-cache")).with_file_name("halide-cache-server")
+        })
+    }
+
+    struct Server {
+        child: Child,
+        url: String,
+        data: TempDir,
+    }
+
+    impl Server {
+        fn start(args: &[&str]) -> Self {
+            let data = TempDir::new().unwrap();
+            let port = std::net::TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port();
+            let child = Command::new(server_binary())
+                .arg("--listen")
+                .arg(format!("127.0.0.1:{port}"))
+                .arg("--data-dir")
+                .arg(data.path())
+                .args(args)
+                .env("RUST_LOG", "error")
+                .spawn()
+                .unwrap();
+            let server = Server {
+                child,
+                url: format!("http://127.0.0.1:{port}"),
+                data,
+            };
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while agent()
+                .get(format!("{}/healthz", server.url))
+                .call()
+                .is_err()
+            {
+                assert!(Instant::now() < deadline, "server did not start");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            server
+        }
+
+        fn stats(&self) -> String {
+            agent()
+                .get(format!("{}/v1/stats", self.url))
+                .call()
+                .unwrap()
+                .body_mut()
+                .read_to_string()
+                .unwrap()
+        }
+
+        fn put(&self, body: impl ureq::AsSendBody) -> u16 {
+            let address = "a".repeat(128);
+            agent()
+                .put(format!("{}/v1/blobs/{address}", self.url))
+                .send(body)
+                .unwrap()
+                .status()
+                .as_u16()
+        }
+    }
+
+    impl Drop for Server {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    const REMOTE_HIT: &str = "Remote cache hits for Halide target kernel";
+
+    #[test]
+    fn a_build_on_one_machine_is_a_hit_on_another() {
+        let server = Server::start(&[]);
+        let (a, b) = (Checkout::new(), Checkout::new());
+        let (cache_a, cache_b) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+
+        a.ok(cache_a.path(), &["--remote", &server.url]);
+        assert!(entries(server.data.path()) > 0, "the build is uploaded");
+
+        let (stdout, _) = b.ok(cache_b.path(), &["--remote", &server.url]);
+        assert!(stdout.contains(REMOTE_HIT), "{stdout}");
+        assert_eq!(a.output("out/kernel.o"), b.output("out/kernel.o"));
+        assert_eq!(a.output("out/kernel.h"), b.output("out/kernel.h"));
+        assert!(entries(cache_b.path()) > 0, "a remote hit is kept locally");
+
+        let (stdout, _) = b.ok(cache_b.path(), &["--remote", &server.url]);
+        assert!(
+            stdout.contains(HIT) && !stdout.contains(REMOTE_HIT),
+            "{stdout}"
+        );
+    }
+
+    #[test]
+    fn a_server_that_is_down_does_not_fail_the_build() {
+        let url = {
+            let server = Server::start(&[]);
+            server.url.clone()
+        };
+        let (checkout, cache) = (Checkout::new(), TempDir::new().unwrap());
+        let (_, stderr) = checkout.ok(cache.path(), &["--remote", &url]);
+        assert!(stderr.contains("remote lookup failed"), "{stderr}");
+        checkout.assert_built_from("kernel source\n");
+    }
+
+    #[test]
+    fn a_corrupt_blob_on_the_server_is_discarded_and_rebuilt() {
+        let server = Server::start(&[]);
+        let (a, b) = (Checkout::new(), Checkout::new());
+        a.ok(TempDir::new().unwrap().path(), &["--remote", &server.url]);
+        for entry in walkdir::WalkDir::new(server.data.path()) {
+            let entry = entry.unwrap();
+            if entry.file_type().is_file() {
+                fs::write(entry.path(), b"zst").unwrap();
+            }
+        }
+        let (_, stderr) = b.ok(TempDir::new().unwrap().path(), &["--remote", &server.url]);
+        assert!(stderr.contains("corrupt remote entry"), "{stderr}");
+        b.assert_built_from("kernel source\n");
+    }
+
+    #[test]
+    fn oversized_uploads_are_rejected() {
+        let server = Server::start(&["--max-blob-size", "1KiB"]);
+        let big = vec![7u8; 4096];
+        assert_eq!(
+            server.put(ureq::SendBody::from_reader(&mut &big[..])),
+            413,
+            "chunked"
+        );
+        assert_eq!(server.put(&big[..]), 413, "with a length");
+        assert_eq!(entries(server.data.path()), 0);
+        assert_eq!(temp_files(server.data.path()), 0);
+        assert_eq!(server.put(&big[..512]), 201, "the server keeps working");
+    }
+
+    #[test]
+    fn concurrent_clients_racing_under_eviction() {
+        let server = Server::start(&["--size", "20", "--evict-interval", "1"]);
+        let checkouts: Vec<Checkout> = (0..8).map(|_| Checkout::new()).collect();
+        for _round in 0..3 {
+            std::thread::scope(|s| {
+                for checkout in &checkouts {
+                    let url = server.url.clone();
+                    s.spawn(move || {
+                        let cache = TempDir::new().unwrap();
+                        checkout.ok(cache.path(), &["--remote", &url]);
+                        checkout.assert_built_from("kernel source\n");
+                    });
+                }
+            });
+            assert_eq!(temp_files(server.data.path()), 0);
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while server.stats().contains("\"evictions\":0") {
+            assert!(Instant::now() < deadline, "the server never evicted");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
 }

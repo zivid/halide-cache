@@ -1,3 +1,5 @@
+mod remote;
+
 use clap::Parser;
 use dirs::home_dir;
 use lager::{Address, LRU, Lager};
@@ -18,6 +20,11 @@ struct Args {
     base_dir: Option<PathBuf>,
     #[arg(long, default_value_os_t = home_dir().unwrap().join(".cache/halide-cache"))]
     cache_dir: PathBuf,
+    /// URL of a halide-cache-server, e.g. http://cache.example.com:8080. Entries
+    /// missing locally are fetched from there, and new entries are uploaded.
+    /// Failures talking to the server are reported but never fail the build.
+    #[arg(long)]
+    remote: Option<String>,
     #[arg(last = true)]
     builder: Vec<String>,
 }
@@ -217,8 +224,14 @@ fn main() -> anyhow::Result<()> {
         address,
     };
 
-    if let Found::Hit = restore_outputs(&lager, &entry)? {
-        return Ok(());
+    let remote = args.remote.as_deref().map(remote::Remote::new);
+
+    match lookup(&lager, remote.as_ref(), &entry)? {
+        Lookup::LocalHit => return Ok(()),
+        Lookup::RemoteHit => {
+            return try_cleaning_up(lager);
+        }
+        Lookup::Miss => {}
     }
 
     let status = Command::new(&args.builder[0])
@@ -227,9 +240,49 @@ fn main() -> anyhow::Result<()> {
 
     if status.success() {
         lager.store_at(&entry.address, &entry.paths())?;
+        if let Some(remote) = &remote
+            && let Err(e) = remote.upload_from(&entry.address, &lager)
+        {
+            warn(format!("upload to remote failed: {e}"));
+        }
     }
 
     try_cleaning_up(lager)
+}
+
+enum Lookup {
+    LocalHit,
+    RemoteHit,
+    Miss,
+}
+
+fn lookup(lager: &Lager, remote: Option<&remote::Remote>, entry: &Entry) -> anyhow::Result<Lookup> {
+    if let Found::Hit = restore_outputs(lager, entry)? {
+        return Ok(Lookup::LocalHit);
+    }
+    let Some(remote) = remote else {
+        return Ok(Lookup::Miss);
+    };
+    match remote.fetch_into(&entry.address, lager) {
+        Ok(true) => {}
+        Ok(false) => return Ok(Lookup::Miss),
+        Err(e) => {
+            warn(format!("remote lookup failed: {e}"));
+            return Ok(Lookup::Miss);
+        }
+    }
+    match restore_outputs(lager, entry) {
+        Ok(Found::Hit) => {
+            println!("Remote cache hits for Halide target {}", entry.target());
+            Ok(Lookup::RemoteHit)
+        }
+        Ok(Found::Miss) => Ok(Lookup::Miss),
+        Err(e) => {
+            warn(format!("discarding corrupt remote entry: {e:#}"));
+            let _ = lager.remove(&entry.address);
+            Ok(Lookup::Miss)
+        }
+    }
 }
 
 fn try_cleaning_up(lager: Lager) -> anyhow::Result<()> {
