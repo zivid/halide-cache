@@ -290,6 +290,13 @@ fn lookup(
 }
 
 fn try_cleaning_up(lager: Lager) -> anyhow::Result<()> {
+    if let Err(e) = clean_up(lager) {
+        warn(format!("local cache cleanup failed: {e:#}"));
+    }
+    Ok(())
+}
+
+fn clean_up(lager: Lager) -> anyhow::Result<()> {
     let lock = NamedLock::create("lager_lock")?;
     if let Ok(_guard) = lock.lock() {
         let mut lru = LRU::new(lager);

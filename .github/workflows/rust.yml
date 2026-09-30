@@ -78,6 +78,13 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test the client
+        run: cargo test --workspace --exclude halide-cache-server
+
   check-releasable:
     runs-on: ubuntu-22.04
     steps:
