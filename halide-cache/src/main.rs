@@ -135,8 +135,8 @@ fn main() -> anyhow::Result<()> {
         .status()?;
 
     if status.success() {
-        lager.store_at(&object_address, &args.generated_object)?;
-        lager.store_at(&header_address, &args.generated_header)?;
+        lager.store_at(&object_address, &[&args.generated_object])?;
+        lager.store_at(&header_address, &[&args.generated_header])?;
     }
 
     try_cleaning_up(lager)?;
@@ -172,8 +172,8 @@ fn cache_hit(
     header_address: &Address,
 ) -> anyhow::Result<bool> {
     match (
-        lager.retrieve(object_address, generated_object),
-        lager.retrieve(header_address, generated_header),
+        lager.retrieve(object_address, &[generated_object]),
+        lager.retrieve(header_address, &[generated_header]),
     ) {
         (Ok(_), Ok(_)) => {
             println!(
