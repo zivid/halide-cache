@@ -1,3 +1,5 @@
+mod archive;
+
 use clap::Parser;
 use dirs::home_dir;
 use lager::{Address, LRU, Lager};
@@ -135,8 +137,8 @@ fn main() -> anyhow::Result<()> {
         .status()?;
 
     if status.success() {
-        lager.store_at(&object_address, &args.generated_object)?;
-        lager.store_at(&header_address, &args.generated_header)?;
+        archive::store(&lager, &object_address, &[&args.generated_object])?;
+        archive::store(&lager, &header_address, &[&args.generated_header])?;
     }
 
     try_cleaning_up(lager)?;
@@ -172,8 +174,8 @@ fn cache_hit(
     header_address: &Address,
 ) -> anyhow::Result<bool> {
     match (
-        lager.retrieve(object_address, generated_object),
-        lager.retrieve(header_address, generated_header),
+        archive::restore(lager, object_address, &[generated_object]),
+        archive::restore(lager, header_address, &[generated_header]),
     ) {
         (Ok(_), Ok(_)) => {
             println!(

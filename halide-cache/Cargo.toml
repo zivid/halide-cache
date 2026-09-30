@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 lager = { path = "../lager" }
+tar = "0.4.44"
+zstd = "0.13.3"
 blake3 = "1.8.2"
 clap = { version = "4.5.53", features = ["derive"] }
 named-lock = "0.4.1"

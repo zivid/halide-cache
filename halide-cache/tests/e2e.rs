@@ -96,7 +96,7 @@ fn files_with(dir: &Path, pred: impl Fn(&str) -> bool) -> usize {
 }
 
 fn entries(dir: &Path) -> usize {
-    files_with(dir, |name| name.ends_with(".zst") && !name.contains(".tmp"))
+    files_with(dir, |name| !name.contains(".tmp"))
 }
 
 const HIT: &str = "Cache hits for Halide target kernel";
