@@ -52,3 +52,25 @@ jobs:
           target: ${{ matrix.target }}
           archive: app-$target
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  upload-server-assets:
+    needs: create-release
+    strategy:
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.target }}
+      - uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          manifest-path: halide-cache-server/Cargo.toml
+          bin: halide-cache-server
+          target: ${{ matrix.target }}
+          archive: halide-cache-server-$target
+          include: halide-cache-server/contrib/halide-cache-server.service
+          token: ${{ secrets.GITHUB_TOKEN }}
