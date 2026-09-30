@@ -1,0 +1,23 @@
+# Install:
+#   install -m 755 halide-cache-server /usr/local/bin/
+#   install -m 644 halide-cache-server.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now halide-cache-server
+[Unit]
+Description=Halide object cache server
+Documentation=https://github.com/zivid/halide-cache
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/halide-cache-server --listen 0.0.0.0:8080 --data-dir /var/lib/halide-cache --size 40GiB
+DynamicUser=yes
+StateDirectory=halide-cache
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
