@@ -157,3 +157,48 @@ fn checkouts_at_different_paths_share_entries() {
     );
     b.assert_built_from("kernel source\n");
 }
+
+#[test]
+fn halide_binary_is_part_of_the_key_but_its_python_layer_is_not() {
+    let (checkout, cache) = (Checkout::new(), TempDir::new().unwrap());
+    checkout.ok(cache.path(), &[]);
+
+    checkout.write("pylib/halide/__init__.py", "# edited python layer\n");
+    let (stdout, _) = checkout.ok(cache.path(), &[]);
+    assert!(stdout.contains(HIT), "{stdout}");
+
+    checkout.write("pylib/halide/halide_.so", "halide 20");
+    let (stdout, _) = checkout.ok(cache.path(), &[]);
+    assert!(!stdout.contains(HIT), "a new halide binary must miss");
+}
+
+#[test]
+fn builder_without_halide_is_an_error() {
+    let (checkout, cache) = (Checkout::new(), TempDir::new().unwrap());
+    fs::remove_dir_all(checkout.path("pylib/halide")).unwrap();
+    let has_halide = Command::new("python")
+        .args([
+            "-c",
+            "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('halide') else 1)",
+        ])
+        .status()
+        .is_ok_and(|s| s.success());
+    if has_halide {
+        return;
+    }
+    let out = checkout.run(cache.path(), &[]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("cannot import halide"), "{stderr}");
+    assert_eq!(entries(cache.path()), 0);
+}
+
+#[test]
+fn halide_without_native_library_is_an_error() {
+    let (checkout, cache) = (Checkout::new(), TempDir::new().unwrap());
+    fs::remove_file(checkout.path("pylib/halide/halide_.so")).unwrap();
+    let out = checkout.run(cache.path(), &[]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("no native library"), "{stderr}");
+}
