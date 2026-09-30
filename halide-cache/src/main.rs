@@ -175,6 +175,10 @@ impl Entry {
     }
 }
 
+fn warn(msg: impl std::fmt::Display) {
+    eprintln!("halide-cache: warning: {msg}");
+}
+
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
@@ -231,6 +235,13 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn try_cleaning_up(lager: Lager) -> anyhow::Result<()> {
+    if let Err(e) = clean_up(lager) {
+        warn(format!("local cache cleanup failed: {e:#}"));
+    }
+    Ok(())
+}
+
+fn clean_up(lager: Lager) -> anyhow::Result<()> {
     let lock = NamedLock::create("lager_lock")?;
     if let Ok(_guard) = lock.lock() {
         let mut lru = LRU::new(lager);
