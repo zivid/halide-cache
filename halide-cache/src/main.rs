@@ -1,3 +1,5 @@
+mod remote;
+
 use clap::Parser;
 use dirs::home_dir;
 use lager::{Address, LRU, Lager};
@@ -18,116 +20,218 @@ struct Args {
     base_dir: Option<PathBuf>,
     #[arg(long, default_value_os_t = home_dir().unwrap().join(".cache/halide-cache"))]
     cache_dir: PathBuf,
+    /// URL of a halide-cache-server, e.g. http://cache.example.com:8080. Entries
+    /// missing locally are fetched from there, and new entries are uploaded.
+    /// Failures talking to the server are reported but never fail the build.
+    #[arg(long)]
+    remote: Option<String>,
     #[arg(last = true)]
     builder: Vec<String>,
 }
 
 const MAX_CACHE_SIZE_BYTES: u64 = 10737418240; // 10 GiB
 
-struct Dependencies<'a> {
-    path: &'a Path,
+const KEY_SCHEME_VERSION: &str = "halide-cache-key-v4";
+
+struct KeyInputs<'a> {
     dependencies: &'a [PathBuf],
     env: &'a [String],
-    cmdline: &'a [&'a str],
+    cmdline: &'a [String],
+    builder_exe: &'a Path,
+    halide: &'a Path,
 }
 
-impl<'a> Dependencies<'a> {
-    fn make_address(&self) -> anyhow::Result<lager::Address> {
-        let mut hasher = blake3::Hasher::new();
+impl KeyInputs<'_> {
+    fn address(&self, object: &str, header: &str) -> anyhow::Result<Address> {
+        fn field(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+            hasher.update(bytes);
+            hasher.update(&[0u8]);
+        }
+        const GROUP_END: &[u8] = b"";
 
-        hasher.update(self.path.as_os_str().as_encoded_bytes());
-        hasher.update(&[0u8]);
-        hasher.update(&[0u8]);
+        let mut h = blake3::Hasher::new();
+
+        field(&mut h, KEY_SCHEME_VERSION.as_bytes());
+        field(&mut h, std::env::consts::OS.as_bytes());
+        field(&mut h, std::env::consts::ARCH.as_bytes());
+        h.update_reader(fs::File::open(self.builder_exe)?)?;
+        h.update(&[0u8]);
+        hash_package(&mut h, self.halide)?;
+        field(&mut h, GROUP_END);
+
+        field(&mut h, object.as_bytes());
+        field(&mut h, header.as_bytes());
+        field(&mut h, GROUP_END);
 
         for d in self.dependencies {
-            let file = std::fs::File::open(d)?;
-            hasher.update_reader(file)?;
-            hasher.update(&[0u8]);
+            h.update_reader(fs::File::open(d)?)?;
+            h.update(&[0u8]);
         }
-        hasher.update(&[0u8]);
+        field(&mut h, GROUP_END);
 
         for e in self.env {
-            hasher.update(e.as_bytes());
-            hasher.update(&[0u8]);
+            field(&mut h, e.as_bytes());
         }
-        hasher.update(&[0u8]);
+        field(&mut h, GROUP_END);
 
         for e in self.cmdline {
-            hasher.update(e.as_bytes());
-            hasher.update(&[0u8]);
+            field(&mut h, e.as_bytes());
         }
-        hasher.update(&[0u8]);
+        field(&mut h, GROUP_END);
 
         let mut buf = [0u8; _];
-        hasher.finalize_xof().fill(&mut buf);
+        h.finalize_xof().fill(&mut buf);
         Ok(buf.into())
     }
+}
+
+fn hash_package(h: &mut blake3::Hasher, package: &Path) -> anyhow::Result<()> {
+    const NATIVE: [&str; 4] = ["so", "pyd", "dll", "dylib"];
+    let is_native = |p: &Path| {
+        p.extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| NATIVE.contains(&e))
+            || p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.contains(".so."))
+    };
+    let mut files: Vec<PathBuf> = walkdir::WalkDir::new(package)
+        .follow_links(true)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .map(|e| e.into_path())
+        .filter(|p| is_native(p))
+        .collect();
+    if files.is_empty() {
+        anyhow::bail!(
+            "the halide package at {} contains no native library; it is not a usable Halide install",
+            package.display()
+        );
+    }
+    files.sort();
+    for file in &files {
+        let relative = file.strip_prefix(package).unwrap_or(file);
+        h.update(normalize_separators(&relative.to_string_lossy()).as_bytes());
+        h.update(&[0u8]);
+        h.update_reader(fs::File::open(file)?)?;
+        h.update(&[0u8]);
+    }
+    Ok(())
+}
+
+fn locate_halide(python: &Path) -> anyhow::Result<PathBuf> {
+    const PROBE: &str = "import importlib.util, sys\n\
+        spec = importlib.util.find_spec('halide')\n\
+        print(spec.origin if spec is not None and spec.origin else '')";
+    let output = Command::new(python)
+        .args(["-c", PROBE])
+        .output()
+        .map_err(|e| anyhow::anyhow!("cannot run {}: {e}", python.display()))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "{} failed while locating the halide package ({}): {}",
+            python.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let origin = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if origin.is_empty() {
+        anyhow::bail!(
+            "{} cannot import halide: the Halide Python package is not installed for this interpreter",
+            python.display()
+        );
+    }
+    let origin = PathBuf::from(origin);
+    let package = if origin
+        .file_name()
+        .is_some_and(|n| n.to_str().is_some_and(|n| n.starts_with("__init__.")))
+    {
+        origin.parent().map(Path::to_path_buf).unwrap_or(origin)
+    } else {
+        origin
+    };
+    if !package.exists() {
+        anyhow::bail!(
+            "halide package reported at {} does not exist",
+            package.display()
+        );
+    }
+    Ok(package)
+}
+
+struct Outputs {
+    object: PathBuf,
+    header: PathBuf,
+    address: Address,
+}
+
+impl Outputs {
+    fn paths(&self) -> [&Path; 2] {
+        [&self.object, &self.header]
+    }
+
+    fn target(&self) -> impl std::fmt::Display + '_ {
+        self.object
+            .file_prefix()
+            .expect("Generated object has a file name")
+            .display()
+    }
+}
+
+fn warn(msg: impl std::fmt::Display) {
+    eprintln!("halide-cache: warning: {msg}");
 }
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    let cache_dir = args.cache_dir;
-
-    if !cache_dir.exists() {
-        fs::create_dir_all(&cache_dir)?;
-    }
-
-    let lager = Lager::new(Path::new(&cache_dir))?;
-
-    let zivid_env = collect_zivid_env();
+    fs::create_dir_all(&args.cache_dir)?;
+    let lager = Lager::new(&args.cache_dir)?;
 
     let base_dir = match args.base_dir {
         Some(d) => d,
         None => find_repo_root()?,
     };
+    let stripper = PathStripper::new(&base_dir);
+    let cmdline: Vec<String> = args.builder.iter().map(|c| stripper.strip(c)).collect();
+    let zivid_env = collect_zivid_env();
+    let builder_exe = which::which(&args.builder[0])
+        .map_err(|e| anyhow::anyhow!("cannot locate builder {:?}: {e}", args.builder[0]))?;
+    let halide = locate_halide(&builder_exe)?;
 
-    let generated_object = args
-        .generated_object
-        .strip_prefix(&base_dir)
-        .unwrap_or(&args.generated_object);
-
-    let generated_header = args
-        .generated_header
-        .strip_prefix(&base_dir)
-        .unwrap_or(&args.generated_header);
-
-    let cmdline = args
-        .builder
-        .iter()
-        .map(|c| {
-            Path::new(c)
-                .strip_prefix(&base_dir)
-                .ok()
-                .and_then(|p| p.to_str())
-                .unwrap_or(c)
-        })
-        .collect::<Vec<&str>>();
-
-    let object_dependencies = Dependencies {
-        path: generated_object,
+    let inputs = KeyInputs {
         dependencies: &args.dependencies,
         env: &zivid_env,
         cmdline: &cmdline,
+        builder_exe: &builder_exe,
+        halide: &halide,
+    };
+    let stripped = |path: &Path| -> anyhow::Result<String> {
+        let utf8 = path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("output path is not valid UTF-8: {path:?}"))?;
+        Ok(stripper.strip(utf8))
+    };
+    let address = inputs.address(
+        &stripped(&args.generated_object)?,
+        &stripped(&args.generated_header)?,
+    )?;
+    let outputs = Outputs {
+        object: args.generated_object,
+        header: args.generated_header,
+        address,
     };
 
-    let header_dependencies = Dependencies {
-        path: generated_header,
-        dependencies: &args.dependencies,
-        env: &zivid_env,
-        cmdline: &cmdline,
-    };
+    let remote = args.remote.as_deref().map(remote::Remote::new);
 
-    let header_address = header_dependencies.make_address()?;
-    let object_address = object_dependencies.make_address()?;
-    if cache_hit(
-        &args.generated_object,
-        &args.generated_header,
-        &lager,
-        &object_address,
-        &header_address,
-    )? {
-        return Ok(());
+    match lookup(&lager, remote.as_ref(), &outputs)? {
+        Lookup::LocalHit => return Ok(()),
+        Lookup::RemoteHit => {
+            return try_cleaning_up(lager);
+        }
+        Lookup::Miss => {}
     }
 
     let status = Command::new(&args.builder[0])
@@ -135,16 +239,64 @@ fn main() -> anyhow::Result<()> {
         .status()?;
 
     if status.success() {
-        lager.store_at(&object_address, &args.generated_object)?;
-        lager.store_at(&header_address, &args.generated_header)?;
+        lager.store_at(&outputs.address, &outputs.paths())?;
+        if let Some(remote) = &remote
+            && let Err(e) = remote.upload_from(&outputs.address, &lager)
+        {
+            warn(format!("upload to remote failed: {e}"));
+        }
     }
 
-    try_cleaning_up(lager)?;
+    try_cleaning_up(lager)
+}
 
-    Ok(())
+enum Lookup {
+    LocalHit,
+    RemoteHit,
+    Miss,
+}
+
+fn lookup(
+    lager: &Lager,
+    remote: Option<&remote::Remote>,
+    outputs: &Outputs,
+) -> anyhow::Result<Lookup> {
+    if let Found::Hit = restore_outputs(lager, outputs)? {
+        return Ok(Lookup::LocalHit);
+    }
+    let Some(remote) = remote else {
+        return Ok(Lookup::Miss);
+    };
+    match remote.fetch_into(&outputs.address, lager) {
+        Ok(true) => {}
+        Ok(false) => return Ok(Lookup::Miss),
+        Err(e) => {
+            warn(format!("remote lookup failed: {e}"));
+            return Ok(Lookup::Miss);
+        }
+    }
+    match restore_outputs(lager, outputs) {
+        Ok(Found::Hit) => {
+            println!("Remote cache hits for Halide target {}", outputs.target());
+            Ok(Lookup::RemoteHit)
+        }
+        Ok(Found::Miss) => Ok(Lookup::Miss),
+        Err(e) => {
+            warn(format!("discarding corrupt remote entry: {e:#}"));
+            let _ = lager.remove(&outputs.address);
+            Ok(Lookup::Miss)
+        }
+    }
 }
 
 fn try_cleaning_up(lager: Lager) -> anyhow::Result<()> {
+    if let Err(e) = clean_up(lager) {
+        warn(format!("local cache cleanup failed: {e:#}"));
+    }
+    Ok(())
+}
+
+fn clean_up(lager: Lager) -> anyhow::Result<()> {
     let lock = NamedLock::create("lager_lock")?;
     if let Ok(_guard) = lock.lock() {
         let mut lru = LRU::new(lager);
@@ -156,6 +308,36 @@ fn try_cleaning_up(lager: Lager) -> anyhow::Result<()> {
     Ok(())
 }
 
+struct PathStripper {
+    prefix: String,
+}
+
+impl PathStripper {
+    fn new(base_dir: &Path) -> Self {
+        let mut prefix = normalize_separators(&base_dir.to_string_lossy());
+        if !prefix.ends_with('/') {
+            prefix.push('/');
+        }
+        PathStripper { prefix }
+    }
+
+    fn strip(&self, input: &str) -> String {
+        let s = normalize_separators(input);
+        if self.prefix == "/" {
+            return s;
+        }
+        s.replace(&self.prefix, "")
+    }
+}
+
+fn normalize_separators(s: &str) -> String {
+    if cfg!(windows) {
+        s.replace('\\', "/")
+    } else {
+        s.to_owned()
+    }
+}
+
 fn collect_zivid_env() -> Vec<String> {
     let mut v = std::env::vars()
         .filter_map(|(k, v)| k.starts_with("ZIVID_").then(|| format!("{}={}", k, v)))
@@ -164,34 +346,19 @@ fn collect_zivid_env() -> Vec<String> {
     v
 }
 
-fn cache_hit(
-    generated_object: &Path,
-    generated_header: &Path,
-    lager: &Lager,
-    object_address: &Address,
-    header_address: &Address,
-) -> anyhow::Result<bool> {
-    match (
-        lager.retrieve(object_address, generated_object),
-        lager.retrieve(header_address, generated_header),
-    ) {
-        (Ok(_), Ok(_)) => {
-            println!(
-                "Cache hits for Halide target {}",
-                generated_object
-                    .file_prefix()
-                    .expect("Generated object has a file name")
-                    .display()
-            );
-            Ok(true)
+enum Found {
+    Hit,
+    Miss,
+}
+
+fn restore_outputs(lager: &Lager, outputs: &Outputs) -> anyhow::Result<Found> {
+    match lager.retrieve(&outputs.address, &outputs.paths()) {
+        Ok(()) => {
+            println!("Cache hits for Halide target {}", outputs.target());
+            Ok(Found::Hit)
         }
-        (
-            Err(lager::Error::NotFound { address: _ }),
-            Err(lager::Error::NotFound { address: _ }),
-        ) => Ok(false),
-        (Err(oe), Err(he)) => Err(anyhow::anyhow!(oe).context(he)),
-        (Ok(_), Err(e)) => Err(anyhow::anyhow!(e).context("Retrieving the object was successful")),
-        (Err(e), Ok(_)) => Err(anyhow::anyhow!(e).context("Retrieving the header was successful")),
+        Err(lager::Error::NotFound { .. }) => Ok(Found::Miss),
+        Err(e) => Err(e.into()),
     }
 }
 
@@ -205,5 +372,56 @@ fn find_repo_root() -> anyhow::Result<PathBuf> {
         if !cwd.pop() {
             anyhow::bail!("Could not determine root");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_prefix_anywhere_in_argument() {
+        let stripper = PathStripper::new(Path::new("/home/user/repo"));
+
+        assert_eq!(stripper.strip("/home/user/repo/build/x.o"), "build/x.o");
+        assert_eq!(
+            stripper.strip("--output=/home/user/repo/build/x.o"),
+            "--output=build/x.o"
+        );
+        assert_eq!(stripper.strip("/opt/conan/bin/gen"), "/opt/conan/bin/gen");
+        assert_eq!(stripper.strip("target=x86-64-linux"), "target=x86-64-linux");
+    }
+
+    #[test]
+    fn the_interpreter_is_part_of_the_key() {
+        let dir = std::env::temp_dir().join(format!("halide-cache-test-{}", std::process::id()));
+        let halide = dir.join("halide");
+        fs::create_dir_all(&halide).unwrap();
+        fs::write(halide.join("halide_.so"), b"halide").unwrap();
+        let (a, b) = (dir.join("python-a"), dir.join("python-b"));
+        fs::write(&a, b"python 3.12").unwrap();
+        fs::write(&b, b"python 3.13").unwrap();
+
+        let cmdline = ["gen".to_owned()];
+        let address = |python: &Path| {
+            KeyInputs {
+                dependencies: &[],
+                env: &[],
+                cmdline: &cmdline,
+                builder_exe: python,
+                halide: &halide,
+            }
+            .address("out.o", "out.h")
+            .unwrap()
+        };
+        assert_ne!(address(&a), address(&b));
+        assert_eq!(address(&a), address(&a));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn root_prefix_is_ignored() {
+        let stripper = PathStripper::new(Path::new("/"));
+        assert_eq!(stripper.strip("/usr/bin/gen"), "/usr/bin/gen");
     }
 }
