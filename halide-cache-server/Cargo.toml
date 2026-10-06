@@ -1,6 +1,6 @@
 [package]
 name = "halide-cache-server"
-version = "0.2.1"
+version = "1.0.0"
 edition = "2024"
 description = "HTTP server sharing halide-cache entries between machines"
 

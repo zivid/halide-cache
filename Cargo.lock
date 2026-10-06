@@ -394,7 +394,7 @@ dependencies = [
 
 [[package]]
 name = "halide-cache"
-version = "0.2.1"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -414,7 +414,7 @@ dependencies = [
 
 [[package]]
 name = "halide-cache-server"
-version = "0.2.1"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -546,7 +546,7 @@ dependencies = [
 
 [[package]]
 name = "lager"
-version = "0.2.1"
+version = "1.0.0"
 dependencies = [
  "hex",
  "tempdir",
