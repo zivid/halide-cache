@@ -12,8 +12,8 @@ jobs:
   create-release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: taiki-e/create-gh-release-action@v1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: taiki-e/create-gh-release-action@eba8ea96c86cca8a37f1b56e94b4d13301fba651 # v1.11.0
         with:
           changelog: CHANGELOG.md
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -34,7 +34,7 @@ jobs:
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
       CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: Install cross-compilation tools
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
@@ -46,7 +46,7 @@ jobs:
           choco install msys2
           C:\tools\msys64\usr\bin\bash.exe -l -c "pacman -S --noconfirm --needed base-devel mingw-w64-ucrt-x86_64-toolchain mingw-w64-ucrt-x86_64-nasm"
           echo "C:\tools\msys64\ucrt64\bin" | Out-File -Append -FilePath $env:GITHUB_PATH -Encoding utf8
-      - uses: taiki-e/upload-rust-binary-action@v1
+      - uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1.30.2
         with:
           manifest-path: halide-cache/Cargo.toml
           bin: halide-cache
@@ -63,11 +63,11 @@ jobs:
           - aarch64-unknown-linux-musl
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: taiki-e/setup-cross-toolchain-action@v1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: taiki-e/setup-cross-toolchain-action@12b7ad4acfa95a1476779d6c06699b96ec1691f8 # v1.42.0
         with:
           target: ${{ matrix.target }}
-      - uses: taiki-e/upload-rust-binary-action@v1
+      - uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1.30.2
         with:
           manifest-path: halide-cache-server/Cargo.toml
           bin: halide-cache-server
