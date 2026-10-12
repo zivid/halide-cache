@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-10-12
+
 ### Fixed
 
 - `halide-cache`: a cache hit into a build directory whose output directory
@@ -85,7 +87,8 @@ through a new `halide-cache-server`.
 
 First release.
 
-[Unreleased]: https://github.com/zivid/halide-cache/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/zivid/halide-cache/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/zivid/halide-cache/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/zivid/halide-cache/compare/v0.2.1...v1.0.0
 [0.2.1]: https://github.com/zivid/halide-cache/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/zivid/halide-cache/compare/v0.1.0...v0.2.0
