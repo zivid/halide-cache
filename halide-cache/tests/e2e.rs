@@ -81,6 +81,10 @@ impl Checkout {
         (stdout, stderr)
     }
 
+    fn remove_output_dir(&self) {
+        fs::remove_dir_all(self.path("out")).unwrap();
+    }
+
     fn assert_built_from(&self, source: &str) {
         assert_eq!(self.output("out/kernel.o"), format!("object:{source}"));
         assert_eq!(self.output("out/kernel.h"), format!("header:{source}"));
@@ -159,6 +163,17 @@ fn checkouts_at_different_paths_share_entries() {
         stdout.contains(HIT),
         "the checkout path must not be part of the key: {stdout}"
     );
+    b.assert_built_from("kernel source\n");
+}
+
+#[test]
+fn a_hit_creates_the_missing_output_directory() {
+    let (a, b, cache) = (Checkout::new(), Checkout::new(), TempDir::new().unwrap());
+    a.ok(cache.path(), &[]);
+
+    b.remove_output_dir();
+    let (stdout, _) = b.ok(cache.path(), &[]);
+    assert!(stdout.contains(HIT), "{stdout}");
     b.assert_built_from("kernel source\n");
 }
 
@@ -324,6 +339,19 @@ mod remote {
             stdout.contains(HIT) && !stdout.contains(REMOTE_HIT),
             "{stdout}"
         );
+    }
+
+    #[test]
+    fn a_remote_hit_creates_the_missing_output_directory() {
+        let server = Server::start(&[]);
+        let (a, b) = (Checkout::new(), Checkout::new());
+        let (cache_a, cache_b) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+        a.ok(cache_a.path(), &["--remote", &server.url]);
+
+        b.remove_output_dir();
+        let (stdout, stderr) = b.ok(cache_b.path(), &["--remote", &server.url]);
+        assert!(stdout.contains(REMOTE_HIT), "{stdout}\n{stderr}");
+        b.assert_built_from("kernel source\n");
     }
 
     #[test]

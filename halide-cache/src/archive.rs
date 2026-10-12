@@ -37,6 +37,9 @@ fn unpack<R: Read>(reader: R, destinations: &[&Path]) -> std::io::Result<()> {
         let mut entry = entries
             .next()
             .ok_or_else(|| corrupt("entry holds fewer files than expected"))??;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         std::io::copy(&mut entry, &mut File::create(path)?)?;
     }
     if entries.next().is_some() {

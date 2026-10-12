@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `halide-cache`: a cache hit into a build directory whose output directory
+  does not exist yet now creates it. Before, a local hit failed the build
+  with `No such file or directory`, and a remote hit was discarded as
+  corrupt and rebuilt.
+
 ## [1.0.0] - 2026-10-06
 
 First stable release. Cache entries can now be shared between machines
